@@ -6,13 +6,18 @@ on:
   pull_request:
 
 jobs:
+  # Every Python version pyproject.toml admits that has been released.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[test]"
       - run: pytest
 
