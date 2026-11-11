@@ -239,12 +239,9 @@ class Compiled:
 
             >>> from pylea import DPP, Bool, flip
             >>> @DPP
-            ... def chain() -> Bool:
-            ...     acc = flip(0.5)
-            ...     for _ in range(5):
-            ...         acc = acc & flip(0.5)
-            ...     return acc
-            >>> chain.compiled().peak_entries()
+            ... def coins() -> tuple[Bool, Bool, Bool, Bool]:
+            ...     return flip(0.5), flip(0.5), flip(0.5), flip(0.5)
+            >>> coins.compiled().peak_entries()
             16
         """
         return max(plan.peak_entries() for plan in self.plans.values())

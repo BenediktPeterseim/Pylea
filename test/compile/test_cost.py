@@ -4,6 +4,7 @@ These pin the counting the planner's decisions rest on, and the shape of the est
 Nothing here asserts that a prediction is close to a wall-clock time, since the constants
 belong to one machine.
 """
+import itertools
 import math
 from dataclasses import replace
 
@@ -31,6 +32,23 @@ def _chain(n: int) -> Program:
     return Program((b.finish((), (w,)),), 0)
 
 
+def _clique(n: int) -> Program:
+    """`n` coin flips, every pair joined by an `and` gate, and the gates joined by `or`.
+
+    The intermediate in which the first coin flip is summed out holds every gate joining it
+    to the other ``n - 1``, none of which is summed out yet, so it has at least
+    ``2 ** (n - 1)`` entries whatever the contraction tree: at ``n = 5``, every `kappa` up
+    to 3 forces slicing.
+    """
+    b = BodyBuilder()
+    xs = [b.emit(Prim.flip(0.3 + 0.05 * i), ())[0] for i in range(n)]
+    (acc,) = b.emit(Prim.flip(0.5), ())
+    for i, j in itertools.combinations(range(n), 2):
+        (g,) = b.emit(Prim.and_(), (xs[i], xs[j]))
+        (acc,) = b.emit(Prim.or_(), (acc, g))
+    return Program((b.finish((), (acc,)),), 0)
+
+
 def _plans(prog, kappa=None):
     plans, _root = compile_program(prog, GreedyOrderFinder(), kappa=kappa)
     return plans
@@ -45,7 +63,7 @@ def test_cost_counts_every_contraction():
 
 def test_steps_are_counted_per_slice_only_where_they_vary():
     """A step hoisted out of the slice loop runs once, so charging it per slice overcharges."""
-    plans = _plans(_chain(12), kappa=2)
+    plans = _plans(_clique(5), kappa=2)
     total = 0
     for p in plans.values():
         slices = max(p.n_slices, 1)
@@ -59,7 +77,7 @@ def test_steps_are_counted_per_slice_only_where_they_vary():
 def test_the_tree_cost_does_not_depend_on_slicing(kappa):
     """The greedy tree is the same with and without slicing, so its cost must be too, while
     the multiplications performed grow with the slices."""
-    program = _chain(12)
+    program = _clique(5)
     held, sliced = _plans(program), _plans(program, kappa=kappa)
     assert any(p.n_slices > 1 for p in sliced.values()), "no plan was sliced"
     assert tree_cost(sliced) == tree_cost(held)
@@ -69,7 +87,7 @@ def test_the_tree_cost_does_not_depend_on_slicing(kappa):
 def test_counts_past_the_float_range_are_infinite_rather_than_an_error():
     """A plan sliced into more pieces than a float can count still compiles; its estimate
     must say it cannot run instead of raising `OverflowError`."""
-    plans = _plans(_chain(12), kappa=2)
+    plans = _plans(_clique(5), kappa=2)
     plans = {i: replace(p, sliced_dims=(2,) * 1100) if p.n_slices > 1 else p
              for i, p in plans.items()}
     assert contraction_cost(plans) == math.inf

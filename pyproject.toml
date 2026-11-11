@@ -14,13 +14,18 @@ dependencies = [
     "numpy",
     "scipy",
     "cotengra",
+    "cotengrust",
 ]
 
 [project.optional-dependencies]
 gpu = ["torch"]
+# cotengra's hyper-optimiser, which compilation runs on the costliest DPPs, uses these where
+# they are installed; kahypar has wheels for macOS and Linux only.
+search = ["kahypar", "optuna", "cmaes"]
 # The notebooks in examples/ need matplotlib; the documentation build runs them.
 docs = ["pdoc", "jupytext", "nbclient", "nbconvert", "ipykernel", "matplotlib"]
-test = ["pytest", "matplotlib"]
+# The notebooks the tests run need matplotlib and IPython.
+test = ["pytest", "matplotlib", "ipython"]
 
 [tool.setuptools.packages.find]
 include = ["pylea*"]

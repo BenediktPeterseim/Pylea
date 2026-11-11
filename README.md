@@ -15,7 +15,9 @@ pip install pylea
 ```
 
 Pylea requires Python 3.12 or later.  `pip install "pylea[gpu]"` also installs PyTorch,
-for evaluation on a GPU.
+for evaluation on a GPU, and `pip install "pylea[search]"` installs kahypar, optuna and
+cmaes, which cotengra uses where installed when it searches for a contraction order for the
+costliest programs (macOS and Linux only).
 
 ## Example
 
