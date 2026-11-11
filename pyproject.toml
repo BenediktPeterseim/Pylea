@@ -10,12 +10,26 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "Benedikt Peterseim" }]
+keywords = ["probabilistic programming", "exact inference", "tensor networks",
+            "Bayesian networks", "fault trees"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
 dependencies = [
     "numpy",
     "scipy",
     "cotengra",
     "cotengrust",
 ]
+
+[project.urls]
+Documentation = "https://benediktpeterseim.github.io/Pylea/"
+Source = "https://github.com/BenediktPeterseim/Pylea"
+Issues = "https://github.com/BenediktPeterseim/Pylea/issues"
 
 [project.optional-dependencies]
 gpu = ["torch"]

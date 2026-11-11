@@ -52,4 +52,4 @@ print(prob(has_disease))                    # 5.0512703945042225e-05
 
 ## Licence
 
-MIT; see [LICENSE](LICENSE).
+MIT; see [LICENSE](https://github.com/BenediktPeterseim/Pylea/blob/main/LICENSE).
