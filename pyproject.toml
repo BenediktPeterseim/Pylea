@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pylea"
+version = "0.1.0"
+description = "Discrete probabilistic programming in Python"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "scipy",
+    "cotengra",
+]
+
+[project.optional-dependencies]
+gpu = ["torch"]
+# The notebooks in examples/ need matplotlib; the documentation build runs them.
+docs = ["pdoc", "jupytext", "nbclient", "nbconvert", "ipykernel", "matplotlib"]
+test = ["pytest", "matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["pylea*"]
+
+[tool.pyright]
+# Scratch space, generated documentation and benchmark data are not part of the checked
+# codebase.
+exclude = ["tmp", "docs/_build", "data", "**/__pycache__"]
+
+[tool.pytest.ini_options]
+addopts = "--doctest-modules -m 'not slow'"
+testpaths = ["test", "pylea"]
+doctest_optionflags = "NORMALIZE_WHITESPACE ELLIPSIS"
+markers = ["slow: long-running statistical grids, deselected by default"]
