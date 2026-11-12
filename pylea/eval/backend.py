@@ -359,9 +359,9 @@ def worth_a_device(steps: float, ops: float, device: str = "mps") -> bool:
     return per_step_us * (1.0 - 1.0 / _SPEEDUP) > floor
 
 
-# How much faster an accelerator's arithmetic is once it is not launch-bound.  Timed on this
-# machine over batched matrix multiplication and transposes, taking the low end of the range
-# so that `worth_a_device` errs towards the CPU.
+# How much faster an accelerator's arithmetic is once it is not launch-bound.  Timed on the
+# MPS device of an Apple M3 Pro over batched matrix multiplication and transposes, taking the
+# low end of the range so that `worth_a_device` errs towards the CPU.
 _SPEEDUP = 8.0
 
 

@@ -58,8 +58,8 @@ def _torch_backend(device: str):
 def test_the_default_backend_is_numpy_and_not_whatever_device_is_present():
     """Evaluation is reproducible unless a caller asks for a device.
 
-    Worth pinning: an MPS device is present on this machine, so a default of `select()` would
-    silently make every evaluation float32.
+    Worth pinning: wherever an MPS device is present, a default of `select()` that used it
+    would silently make every evaluation float32.
     """
     plans, root = compile_program(CORPUS[0], GreedyOrderFinder(), kappa=28)
     default, scale = evaluate(plans, root)

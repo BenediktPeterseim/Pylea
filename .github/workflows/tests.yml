@@ -33,3 +33,18 @@ jobs:
           python-version: "3.13"
       - run: pip install -e ".[test]"
       - run: pytest -m slow
+
+  # torch is optional, so the jobs above skip the tests of the torch backend.  Here they run
+  # on the CPU, with torch's CPU-only build; the MPS and CUDA tests still skip.
+  torch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e ".[test]"
+      # A failed import here fails the job; inside pytest it would only skip the tests.
+      - run: python -c "import torch"
+      - run: pytest test/eval/test_backend.py pylea/eval/backend.py
