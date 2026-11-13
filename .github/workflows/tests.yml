@@ -6,12 +6,13 @@ on:
   pull_request:
 
 jobs:
-  # Every Python version pyproject.toml admits that has been released.
+  # Every Python version pyproject.toml admits that has been released, on Linux and Windows.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4

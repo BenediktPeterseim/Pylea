@@ -6,6 +6,11 @@ enough network a single trial runs far beyond it.  The protocol is one pickled r
 stdin, ``((optimize, escalate_cost, max_time), (indices, output, size, kappa))``, and one
 pickled response on stdout, ``{"order": order}`` or ``{"error": message}``.  The finder's
 settings travel rather than the finder itself, so a subclass defined anywhere still runs.
+
+The worker is run by `pylea.compile._process_tree.ProcessTree`.  It starts no process
+before it has read the request, which is what lets the tree stop every process the search
+starts, and once it has read it, the end of its standard input stops it, since the parent
+keeps that open while it waits.
 """
 from __future__ import annotations
 
@@ -14,10 +19,12 @@ import sys
 
 
 def main() -> None:
+    from pylea.compile._process_tree import exit_with_parent
     from pylea.compile.order import AdaptiveOrderFinder
 
     (optimize, escalate_cost, max_time), (indices, output, size, kappa) = pickle.load(
         sys.stdin.buffer)
+    exit_with_parent()
     finder = AdaptiveOrderFinder(optimize, escalate_cost, max_time)
     try:
         response = {"order": finder.find_here(indices, output, size, kappa=kappa)}

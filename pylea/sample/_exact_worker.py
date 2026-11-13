@@ -11,6 +11,12 @@ them, plus `trace`; mode ``"predict"`` compiles a greedy unsimplified plan and r
 `predicted_ms`, so the portfolio algorithm can budget the predictor by killing this
 process.  Any failure becomes an `error` string.  Pickling the traced `Program` rather than
 re-importing the DPP keeps the worker independent of where the DPP was defined.
+
+The worker is run by `pylea.compile._process_tree.ProcessTree`, so that killing it also
+kills the processes it started: the order search of the planner's last stage, and the
+processes that search starts.  It starts no process before it has read the request, and
+once it has read it, the end of its standard input stops it, since the parent keeps that
+open while it waits.
 """
 from __future__ import annotations
 
@@ -62,7 +68,10 @@ def predict_program(program, compile_kwargs: dict) -> float:
 
 
 def main() -> None:
+    from pylea.compile._process_tree import exit_with_parent
+
     mode, program, compile_kwargs = pickle.load(sys.stdin.buffer)
+    exit_with_parent()
     try:
         if mode == "predict":
             response = {"predicted_ms": predict_program(program, compile_kwargs)}

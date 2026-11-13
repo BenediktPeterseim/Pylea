@@ -64,13 +64,13 @@ from __future__ import annotations
 
 import math
 import pickle
-import subprocess
 import sys
 import threading
 import time
 
 import numpy as np
 
+from pylea.compile._process_tree import ProcessTree
 from pylea.ir.program import op_count
 from pylea.sample._exact_worker import probe_compile_kwargs
 from pylea.sample.cost_model import (
@@ -88,28 +88,25 @@ from pylea.syntax.estimate import Estimate
 class ExactLane:
     """The exact engine evaluating a DPP in a killable subprocess.
 
-    A background thread drains the worker's stdout, so a large response can never
-    deadlock the pipe while the parent is only polling; the payload write in the
-    constructor is safe because reading the request is the worker's first act.  A
-    request that cannot be pickled becomes an error response rather than an exception,
-    so a racing caller handles it like any other worker failure.
+    The subprocess is a `pylea.compile._process_tree.ProcessTree`, so `kill` also stops
+    the processes the worker started, and every caller calls `kill` once it no longer
+    needs the lane.  A background thread drains the worker's stdout, so a large response
+    can never deadlock the pipe while the parent is only polling; the payload write in the
+    constructor is safe because the worker reads the request before it writes anything.  A
+    request that cannot be pickled becomes an error response rather than an exception, so
+    a racing caller handles it like any other worker failure.
     """
 
     def __init__(self, program, compile_kwargs: dict, mode: str = "evaluate"):
         self.started = time.monotonic()
-        self._process = subprocess.Popen(
-            [sys.executable, "-m", "pylea.sample._exact_worker"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        assert self._process.stdin is not None
+        self._tree = ProcessTree([sys.executable, "-m", "pylea.sample._exact_worker"])
+        self._process = self._tree.process
         self._out = b""
         self._response: dict | None = None
         self._reader = threading.Thread(target=self._drain, daemon=True)
         self._reader.start()
         try:
-            pickle.dump((mode, program, compile_kwargs), self._process.stdin)
-            self._process.stdin.close()
-        except BrokenPipeError:
-            pass                      # the worker died on start; response() reports it
+            self._tree.send((mode, program, compile_kwargs))
         except (pickle.PicklingError, TypeError, AttributeError) as exc:
             self._response = {
                 "error": f"the request could not be pickled for the subprocess: {exc}"}
@@ -153,9 +150,10 @@ class ExactLane:
         return response
 
     def kill(self) -> None:
-        if self._process.poll() is None:
-            self._process.kill()
-            self._process.wait()
+        """Stops the worker, if it is still running, with every process it started, and
+        closes the pipe to it."""
+        self._tree.kill()
+        self._tree.close()
 
     @property
     def elapsed(self) -> float:
@@ -174,6 +172,8 @@ def exact_matrix_within(dpp, max_time: float | None, compile_kwargs: dict):
         raise TimeoutError(
             "the exact engine did not finish within max_time; an exact query never "
             "falls back to sampling, so pass a larger deadline") from None
+    finally:
+        lane.kill()
     if "error" in response:
         raise RuntimeError(f"the exact engine failed: {response['error']}")
     return response["array"], response["scale"]
@@ -377,6 +377,8 @@ def _budgeted_prediction(dpp, program, compile_kwargs: dict, budget: float,
         trace.append(f"auto: exact predictor exceeded its {budget:.3g}s budget, "
                      "treated as unpredicted")
         return math.inf
+    finally:
+        lane.kill()
     if "error" in response:
         trace.append(f"auto: exact predictor failed ({response['error']})")
         return math.inf

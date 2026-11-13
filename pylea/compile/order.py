@@ -17,10 +17,15 @@ never worse than `GreedyOrderFinder`'s.  Improvement starts from the winner as i
 before slicing, so that slicing and structure are searched together, and replaces it only
 where it scores better.
 
-Searches run on a thread with a large stack and a raised recursion limit, cotengra recursing
-in the depth of the tree.  An `AdaptiveOrderFinder` given a `max_time` runs its search in a
-subprocess instead, which is stopped once the bound has passed: cotengra tests its own budget
-only between trials, which does not bound a single trial.
+**Every tree has the indices, size and cost of each of its nodes computed as soon as it is
+built, from the leaves upwards.**  cotengra otherwise computes a node's indices on first use
+from those of its children, recursing once per level of the tree, and its slicer starts at
+the root; on a deep tree, such as a fan-out of one variable to many assignments produces,
+that recursion exceeds Python's recursion limit.
+
+An `AdaptiveOrderFinder` given a `max_time` runs its search in a subprocess, which is
+stopped, together with the processes cotengra starts in it, once the bound has passed:
+cotengra tests its own budget only between trials, which does not bound a single trial.
 
 Where even the best tree has an intermediate too large for a float, cotengra's scoring
 overflows; the finder then warns and returns a left-to-right path, leaving the plan for the
@@ -28,19 +33,16 @@ evaluator's width bound to reject.
 """
 from __future__ import annotations
 
-import os
 import pickle
 import random
-import signal
-import subprocess
 import sys
 import threading
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Protocol
 
-_T = TypeVar("_T")
+from pylea.compile._process_tree import ProcessTree
 
 # Greedy contraction cost, in scalar multiplications, above which `AdaptiveOrderFinder`
 # escalates.  Placed in the gap between the easy and the hard Bayesian networks of the
@@ -68,36 +70,19 @@ class OrderFinder(Protocol):
     def find(self, indices, output, size, *, kappa: int | None = None) -> Order: ...
 
 
-def _run_recursion_safe(fn: Callable[[], _T], *, stack_bytes: int = 256 * 1024 * 1024,
-                        recursion_limit: int = 1_000_000) -> _T:
-    """`fn()`, run on a thread with a large C stack and a raised recursion limit.
+def _contraction_tree(ins, out, sizes, optimize) -> Any:
+    """cotengra's contraction tree for the network, every node's indices, size and cost
+    computed.
 
-    cotengra's tree construction, slicing and path extraction all recurse in the tree depth,
-    so a deep tree overflows the default limit and could exhaust the main thread's stack.
+    `contract_stats` computes them in cotengra's bottom-up traversal, which does not recurse,
+    so that no later step computes them from the root down; the module docstring says why.
     """
-    box: dict[str, Any] = {}
+    import cotengra as ctg
 
-    def run() -> None:
-        old_limit = sys.getrecursionlimit()
-        sys.setrecursionlimit(max(old_limit, recursion_limit))
-        try:
-            box["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001, re-raised on the caller's thread
-            box["error"] = exc
-        finally:
-            sys.setrecursionlimit(old_limit)
-
-    old_stack = threading.stack_size()
-    try:
-        threading.stack_size(stack_bytes)
-        worker = threading.Thread(target=run)
-        worker.start()
-        worker.join()
-    finally:
-        threading.stack_size(old_stack)
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+    tree: Any = ctg.array_contract_tree(ins, out, sizes, optimize=optimize,
+                                        canonicalize=False)
+    tree.contract_stats()
+    return tree
 
 
 def _symbols(indices, output, size):
@@ -161,13 +146,11 @@ class AdaptiveOrderFinder:
         ins, out, sizes, label = _symbols(indices, output, size)
 
         def work() -> Order:
-            tree: Any = ctg.array_contract_tree(ins, out, sizes, optimize="greedy",
-                                                canonicalize=False)
+            tree: Any = _contraction_tree(ins, out, sizes, "greedy")
             if tree.contraction_cost() > self.escalate_cost:
                 optimize: Any = (ctg.AutoHQOptimizer(max_time=self.max_time)
                                  if self.max_time is not None else self.optimize)
-                tree = ctg.array_contract_tree(ins, out, sizes, optimize=optimize,
-                                               canonicalize=False)
+                tree = _contraction_tree(ins, out, sizes, optimize)
             return _finish(tree, label, kappa)
 
         return _guarded(work, n)
@@ -196,15 +179,12 @@ class GreedyOrderFinder:
         return hash(type(self))
 
     def find(self, indices, output, size, *, kappa: int | None = None) -> Order:
-        import cotengra as ctg
-
         n = len(indices)
         if n <= 1 or not size:
             return Order(_linear(n), ())
         ins, out, sizes, label = _symbols(indices, output, size)
         return _guarded(lambda: _finish(
-            ctg.array_contract_tree(ins, out, sizes, optimize="greedy", canonicalize=False),
-            label, kappa), n)
+            _contraction_tree(ins, out, sizes, "greedy"), label, kappa), n)
 
 
 class SlicedBestOfOrderFinder:
@@ -237,8 +217,6 @@ class SlicedBestOfOrderFinder:
         self.trials = 0                 # candidates tried, the unpermuted tree not counted
 
     def find(self, indices, output, size, *, kappa: int | None = None) -> Order:
-        import cotengra as ctg
-
         n = len(indices)
         if n <= 1 or not size:
             return Order(_linear(n), ())
@@ -254,8 +232,7 @@ class SlicedBestOfOrderFinder:
 
         def work() -> Order:
             t0 = time.perf_counter()
-            raw = ctg.array_contract_tree(ins, out, sizes, optimize="greedy",
-                                          canonicalize=False)
+            raw = _contraction_tree(ins, out, sizes, "greedy")
             best_cost, best = score(raw)
             best_raw = raw
             best_perm: list[int] | None = None
@@ -274,8 +251,7 @@ class SlicedBestOfOrderFinder:
                 perm = list(range(n))
                 rng.shuffle(perm)
                 try:
-                    raw = ctg.array_contract_tree([ins[j] for j in perm], out, sizes,
-                                                  optimize="greedy", canonicalize=False)
+                    raw = _contraction_tree([ins[j] for j in perm], out, sizes, "greedy")
                     cost, sliced = score(raw)
                 except Exception:
                     stale += 1
@@ -306,14 +282,20 @@ def _reconfigured(sliced, raw, cost: float, target):
     both is what lets slicing and structure be searched together.  Without a `target` there
     is nothing to slice and only the structure is reconfigured.
 
-    A target that the free indices alone exceed raises `RuntimeError`, and a width beyond
-    what a float holds raises `OverflowError`.  Both leave the already-scored tree in place,
-    this step being an optimisation that must not fail a compilation the search survived.
+    The candidate is sliced to the width `sliced` meets: `target`, or, where the free
+    indices alone exceed `target`, the wider bound `slice_to` settled on.  The two trees are
+    then compared at the same bound, and the candidate's bound is one that slicing summed
+    indices alone can meet, cotengra failing on any other.
+
+    cotengra failing to slice raises `RuntimeError`, and a width beyond what a float holds
+    raises `OverflowError`.  Both leave the already-scored tree in place, this step being an
+    optimisation that must not fail a compilation the search survived.
     """
     try:
         candidate = raw.copy()
         if target is not None:
-            candidate.slice_and_reconfigure_(target_size=int(target))
+            width = max(int(target), int(sliced.max_size()))
+            candidate.slice_and_reconfigure_(target_size=width, allow_outer=False)
         else:
             candidate.subtree_reconfigure_()
         improved = float(candidate.contraction_cost())
@@ -352,7 +334,7 @@ def _finish(tree, label, kappa: int | None, already_sliced: bool = False) -> Ord
 
 def _guarded(work, n: int) -> Order:
     try:
-        return _run_recursion_safe(work)
+        return work()
     except OverflowError:
         # cotengra scores trees in floating point, which overflows once even the best tree has
         # an intermediate above ``2**1023``, meaning the network's treewidth is beyond what a
@@ -369,34 +351,25 @@ def _bounded_search(settings: tuple, network: tuple, limit: float) -> Order:
     searched in a subprocess that is stopped after `limit` seconds.
 
     Raises `TimeoutError` where the search is stopped and `RuntimeError` where the worker
-    fails.  The worker runs in a session of its own, so stopping it also stops any process
-    cotengra started.
+    fails.  Stopping the worker also stops the processes cotengra started in it.
     """
-    process = subprocess.Popen([sys.executable, "-m", "pylea.compile._order_worker"],
-                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               start_new_session=True)
-    assert process.stdin is not None and process.stdout is not None
-    stdout = process.stdout
-    received: list[bytes] = []
-    # The response is read on a thread so that a large one cannot fill the pipe while this
-    # process waits; the request is safe to write, reading it being the worker's first act.
-    reader = threading.Thread(target=lambda: received.append(stdout.read()), daemon=True)
-    reader.start()
-    try:
-        pickle.dump((settings, network), process.stdin)
-        process.stdin.close()
-    except BrokenPipeError:
-        pass                            # the worker died on start; reported below
-    reader.join(limit)
-    if reader.is_alive():
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    with ProcessTree([sys.executable, "-m", "pylea.compile._order_worker"]) as tree:
+        process = tree.process
+        assert process.stdout is not None
+        stdout = process.stdout
+        received: list[bytes] = []
+        # The response is read on a thread so that a large one cannot fill the pipe while
+        # this process waits; the request is safe to write, the worker reading it before it
+        # writes anything.
+        reader = threading.Thread(target=lambda: received.append(stdout.read()), daemon=True)
+        reader.start()
+        tree.send((settings, network))
+        reader.join(limit)
+        if reader.is_alive():
+            tree.kill()
+            raise TimeoutError(
+                f"the contraction-tree search did not finish within {limit:.0f} s")
         process.wait()
-        raise TimeoutError(
-            f"the contraction-tree search did not finish within {limit:.0f} s")
-    process.wait()
     if not received or not received[0]:
         raise RuntimeError("the contraction-tree search subprocess produced no response")
     response = pickle.loads(received[0])

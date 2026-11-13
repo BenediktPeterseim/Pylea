@@ -271,6 +271,9 @@ def test_the_subprocess_prediction_is_computed_once_per_model_and_kappa(monkeypa
         def response(self, timeout=None):
             return {"predicted_ms": 1500.0}
 
+        def kill(self):
+            pass
+
         @property
         def elapsed(self):
             return 0.0
