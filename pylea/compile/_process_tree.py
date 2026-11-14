@@ -13,13 +13,14 @@ A process the worker starts belongs to the job only if it starts after the assig
 `ProcessTree` makes before it returns; a worker that reads its request before it starts any
 process is therefore covered whole.
 
-**A worker also stops when its parent has gone.**  `send` leaves the worker's standard input
-open, and the worker calls `exit_with_parent` once it has read its request, so that the end
-of its input, which comes when the parent closes it or exits, ends the worker and, on POSIX,
-its process group.  A worker started by a worker is in a session of its own, which a signal
-to its parent's process group does not reach; this is what stops it.  On Windows a job
-created by a process in a job is nested in that job, so terminating the outer job, or the
-exit of the process holding the inner job's handle, already stops it.
+**A worker also stops when its parent has gone.**  On POSIX, `send` leaves the worker's
+standard input open, and the worker calls `exit_with_parent` once it has read its request,
+so that the end of its input, which comes when the parent closes it or exits, ends the
+worker and its process group.  A worker started by a worker is in a session of its own,
+which a signal to its parent's process group does not reach; this is what stops it.  On
+Windows a job created by a process in a job is nested in that job, so terminating the outer
+job, or closing the inner job's handle, which happens when the process holding it exits,
+already stops it, and `exit_with_parent` does nothing.
 """
 from __future__ import annotations
 
@@ -108,17 +109,20 @@ class ProcessTree:
 
 
 def exit_with_parent() -> None:
-    """Ends this process, and on POSIX its process group, once its standard input ends.
+    """Ends this process and its process group once its standard input ends, on POSIX.
 
     The check runs on a daemon thread, so this returns at once.  A worker calls it after
     reading its request; the group it ends is then the worker and the processes it started,
-    `ProcessTree` making the worker the leader of a group of its own.
+    `ProcessTree` making the worker the leader of a group of its own.  On Windows the job
+    objects stop the worker, so this does nothing; the module docstring says how.
     """
+    if sys.platform == "win32":
+        return
     stdin = sys.stdin.buffer
 
     def watch() -> None:
         stdin.read()
-        if sys.platform != "win32" and os.getpgrp() == os.getpid():
+        if os.getpgrp() == os.getpid():
             import signal
 
             os.killpg(os.getpid(), signal.SIGKILL)

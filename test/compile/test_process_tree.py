@@ -8,6 +8,8 @@ to, which works the same on every platform.
 import sys
 import time
 
+import pytest
+
 from pylea.compile._process_tree import ProcessTree
 
 # Appends to the file named in its request until it is stopped.
@@ -22,13 +24,27 @@ while True:
     time.sleep(0.02)
 """
 
-# Starts `_INNER` in a tree of its own, then waits.
+# Starts `_INNER` in a tree of its own, then waits.  Each step, and any exception, is
+# appended to a log beside the file `_INNER` writes, which a failing test reports.
 _OUTER = """
-import pickle, sys, time
-from pylea.compile._process_tree import ProcessTree, exit_with_parent
+import pickle, sys, time, traceback
 inner, path = pickle.load(sys.stdin.buffer)
-exit_with_parent()
-ProcessTree([sys.executable, "-c", inner]).send(path)
+
+def log(text):
+    with open(path + ".log", "a") as f:
+        f.write(text + "\\n")
+
+try:
+    from pylea.compile._process_tree import ProcessTree, exit_with_parent
+    exit_with_parent()
+    log("request read")
+    tree = ProcessTree([sys.executable, "-c", inner])
+    log("inner worker started")
+    tree.send(path)
+    log("request sent")
+except BaseException:
+    log(traceback.format_exc())
+    raise
 time.sleep(600)
 """
 
@@ -47,7 +63,12 @@ def _grows(path, within: float) -> bool:
 def _nested(path) -> ProcessTree:
     tree = ProcessTree([sys.executable, "-c", _OUTER])
     tree.send((_INNER, str(path)))
-    assert _grows(path, within=60.0), "the inner worker never started"
+    if not _grows(path, within=60.0):
+        tree.kill()
+        tree.close()
+        log = path.with_name(path.name + ".log")
+        steps = log.read_text() if log.exists() else "nothing logged"
+        pytest.fail(f"the inner worker never started; the outer worker logged:\n{steps}")
     return tree
 
 
