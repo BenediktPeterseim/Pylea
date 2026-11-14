@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pylea"
-version = "0.1.0"
+version = "0.1.1"
 description = "Discrete probabilistic programming in Python"
 readme = "README.md"
 license = "MIT"
