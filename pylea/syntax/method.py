@@ -321,14 +321,14 @@ def table_query(dpp, contract: Contract, compile_kwargs: dict, *,
             floor=contract.floor, max_time=contract.max_time, seed=contract.seed,
             normalised_contract=normalised_contract, what=what,
             compile_kwargs=compile_kwargs)
-    started = time.monotonic()
+    started = time.perf_counter()
     if contract.max_time is None:
         array, log_scale = dpp.compiled(**compile_kwargs).matrix()
     else:
         from pylea.sample.exact_lane import exact_matrix_within
 
         array, log_scale = exact_matrix_within(dpp, contract.max_time, compile_kwargs)
-    return ExactTable(array, log_scale, time.monotonic() - started)
+    return ExactTable(array, log_scale, time.perf_counter() - started)
 
 
 def refuse_stray_mass(distribution: np.ndarray, patterns, type_name: str,
@@ -368,7 +368,7 @@ def scalar_query(dpp, contract: Contract, compile_kwargs: dict, *, what: str, va
     takes them.  The result is an `pylea.syntax.estimate.Estimate` under every method.
     """
     if contract.method == "exact":
-        started = time.monotonic()
+        started = time.perf_counter()
         if contract.max_time is None:
             value = exact_value()
         else:
@@ -376,7 +376,7 @@ def scalar_query(dpp, contract: Contract, compile_kwargs: dict, *, what: str, va
 
             array, scale = exact_matrix_within(dpp, contract.max_time, compile_kwargs)
             value = exact_from_matrix(array, scale)
-        return Estimate.from_exact(value, elapsed=time.monotonic() - started)
+        return Estimate.from_exact(value, elapsed=time.perf_counter() - started)
     if contract.method == "auto":
         from pylea.sample.portfolio import decide_scalar
 

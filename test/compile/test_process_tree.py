@@ -478,15 +478,37 @@ def test_a_tree_that_nothing_holds_stops_its_worker():
     gc.collect()
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        try:
-            done = os.waitpid(worker, os.WNOHANG)[0] == worker
-        except ChildProcessError:
-            done = True
-        if done:
+        if _has_ended(worker):
             break
         time.sleep(0.05)
     else:
         pytest.fail("the worker of a dropped tree is still running")
+
+
+def _has_ended(pid: int) -> bool:
+    """Whether the process `pid`, a child of this one whose `Popen` is gone, has ended.
+
+    POSIX asks `waitpid` without waiting, which also reaps the child; Windows, which has
+    no `WNOHANG`, opens the process and asks whether its handle is signalled.
+    """
+    import os
+
+    if sys.platform != "win32":
+        try:
+            return os.waitpid(pid, os.WNOHANG)[0] == pid
+        except ChildProcessError:
+            return True
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(0x00100000, False, pid)      # SYNCHRONIZE
+    if not handle:
+        return True                                            # no such process
+    try:
+        return kernel32.WaitForSingleObject(ctypes.c_void_p(handle), 0) == 0
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
 def test_entries_of_sys_path_that_are_not_plain_strings_do_not_break_the_worker(
@@ -498,9 +520,12 @@ def test_entries_of_sys_path_that_are_not_plain_strings_do_not_break_the_worker(
     class Entry(str):
         pass
 
+    # Together longer than any command line, which is why `sys.path` travels on the
+    # worker's standard input; each entry stays below the length past which Windows
+    # refuses to look up a path at all.
+    long = [f"/nonexistent/{k:03d}/" + "x" * 1000 for k in range(200)]
     monkeypatch.setattr(sys, "path", sys.path + [pathlib.Path("/nonexistent/dir"),
-                                                 Entry("/nonexistent/subclass"),
-                                                 "/nonexistent/" + "x" * 200_000])
+                                                 Entry("/nonexistent/subclass")] + long)
 
     @DPP
     def coin() -> Bool:

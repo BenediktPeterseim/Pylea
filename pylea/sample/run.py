@@ -263,7 +263,7 @@ def _certify(program, numerator, denominator, ledger: Certificate, *, next_step,
     the first trace line from the particle count and how the run ended, and
     `out_of_reach` the line saying why a run stopped short of its target.
     """
-    started = time.monotonic()
+    started = time.perf_counter()
     n = 0
     low, high, point = 0.0, 1.0, 0.5
     met = False
@@ -301,7 +301,7 @@ def _certify(program, numerator, denominator, ledger: Certificate, *, next_step,
         if deadline.expired() or (stop is not None and stop()):
             break
     trace = (describe(n, ending),) + reason + ledger.splits
-    return RunOutcome(point, low, high, n, time.monotonic() - started, met, trace)
+    return RunOutcome(point, low, high, n, time.perf_counter() - started, met, trace)
 
 
 def _unreachable(numerator, denominator, rel_err: float, floor: float | None,
@@ -406,7 +406,7 @@ def run_table(program: SweepProgram | PackedProgram, *, rel_err: float,
     `normalised_contract` the factor is left out, as `TableOutcome` states.
     """
     deadline = deadline or Deadline.never()
-    started = time.monotonic()
+    started = time.perf_counter()
     size = 1 << program.out_bits
     share = 1.0 / (size + 1)
     delta = (1.0 - confidence) * share
@@ -506,7 +506,7 @@ def run_table(program: SweepProgram | PackedProgram, *, rel_err: float,
                     np.array([total_point, total_low, total_high])))
             return TableOutcome(
                 point, low, high, float(totals[0]), float(totals[1]), float(totals[2]),
-                floor, n, time.monotonic() - started, met,
+                floor, n, time.perf_counter() - started, met,
                 (f"sampling: table, {'with' if sweeping else 'without'} resampling, "
                  f"{n} samples, "
                  f"{'target met' if met else 'stopped' if stopped else 'stopped at the deadline'}",

@@ -180,7 +180,7 @@ def certified(dpp, key, compute):
     returns a copy of the cached result with this call's `elapsed` and a trace line
     saying where it came from, so no two callers share one object.
     """
-    started = time.monotonic()
+    started = time.perf_counter()
     entry = cache_entry(dpp)
     if key is None or key not in entry:
         result = compute()
@@ -190,7 +190,7 @@ def certified(dpp, key, compute):
     cached = entry[key]
     trace = cached.trace + ("result cache: the result of an earlier call with the same "
                             "seed and contract",)
-    elapsed = time.monotonic() - started
+    elapsed = time.perf_counter() - started
     if isinstance(cached, Estimate):
         return cached.replace(elapsed=elapsed, trace=trace)
     return replace(cached, elapsed=elapsed, trace=trace)

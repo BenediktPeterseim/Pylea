@@ -31,7 +31,7 @@ class ExactLane:
 
     def __init__(self, program, compile_kwargs: dict, mode: str = "evaluate",
                  name: str | None = None):
-        self.started = time.monotonic()
+        self.started = time.perf_counter()
         self._unsent: dict | None = None
         if mode == "predict":
             # The prediction compiles with its own finder and no simplification; of the
@@ -102,7 +102,7 @@ class ExactLane:
     @property
     def elapsed(self) -> float:
         """Seconds since the lane started."""
-        return time.monotonic() - self.started
+        return time.perf_counter() - self.started
 
 
 def exact_matrix_within(dpp, max_time: float | None, compile_kwargs: dict):
@@ -112,12 +112,12 @@ def exact_matrix_within(dpp, max_time: float | None, compile_kwargs: dict):
     deadline, the `pylea.compile.lower.ExactInferenceInfeasible` the exact engine raised
     where it refused the DPP, and `RuntimeError` on any other worker failure.
     """
-    started = time.monotonic()
+    started = time.perf_counter()
     lane = None
     try:
         lane = ExactLane(dpp.program(), compile_kwargs, name=dpp.name())
         # The deadline counts from the call, so preparing the request is inside it.
-        remaining = None if max_time is None else max_time - (time.monotonic() - started)
+        remaining = None if max_time is None else max_time - (time.perf_counter() - started)
         response = lane.response(timeout=remaining)
     except DeadlineExceeded:
         raise DeadlineExceeded(

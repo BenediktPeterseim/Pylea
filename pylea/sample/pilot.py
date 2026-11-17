@@ -202,15 +202,16 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
     drawn = 0
     counts = np.zeros(1 << program.out_bits)
     bounded = deadline.expires_at is not None
-    started = time.monotonic()
+    started = time.perf_counter()
     # Under a deadline a calibration batch of 64 samples, the packed kernel's word
     # width, comes first, and its time per sample sizes the later batches, each run
     # only where it fits in whole words.
     for k in range(PILOT_IID_BATCHES + bounded):
         size = batch
         if bounded:
-            fit = 64 if k == 0 else int(
-                deadline.remaining() * drawn / (time.monotonic() - started))
+            took = time.perf_counter() - started
+            fit = 64 if k == 0 else (batch if took <= 0.0 else
+                                     int(deadline.remaining() * drawn / took))
             size = min(batch, fit - fit % 64)
         if size == 0:
             break
@@ -224,7 +225,7 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
         assert result.total_sq is not None
         accepted_sq += result.total_sq
         drawn += size
-    iid_seconds = (time.monotonic() - started) / drawn
+    iid_seconds = (time.perf_counter() - started) / drawn
     mass = hits / drawn
     evidence_mass = accepted / drawn
     # The streams the run certifies, as ``(mass, relvar)`` pairs; `None` prices a
@@ -257,7 +258,7 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
         den_values: list[float] = []
         num_values: list[float] = []
         fraction_sum = np.zeros(program.n_stages)
-        started = time.monotonic()
+        started = time.perf_counter()
         for k in range(PILOT_SWEEPS):
             if k and deadline.expired():
                 break
@@ -269,7 +270,7 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
             num_values.append(float(values @ result.counts) * scale)
             assert result.stage_fractions is not None
             fraction_sum += result.stage_fractions
-        sweep_seconds = (time.monotonic() - started) / (len(den_values)
+        sweep_seconds = (time.perf_counter() - started) / (len(den_values)
                                                         * PILOT_SWEEP_PARTICLES)
         den = np.array(den_values)
         num = np.array(num_values)

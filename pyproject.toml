@@ -27,7 +27,7 @@ dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
     "cotengra>=0.7.5",
-    "cotengrust",
+    "cotengrust>=0.1.1",
 ]
 
 [project.urls]

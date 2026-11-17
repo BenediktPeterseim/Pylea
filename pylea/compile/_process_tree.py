@@ -40,6 +40,7 @@ caller before the caller held it ends its worker as well.
 from __future__ import annotations
 
 import contextlib
+import errno
 import math
 import os
 import pickle
@@ -331,8 +332,9 @@ class ProcessTree:
         if stdin is not None and not stdin.closed:
             try:
                 stdin.close()
-            except BrokenPipeError:
-                pass
+            except OSError as exc:
+                if not _reader_gone(exc):
+                    raise
         if sys.platform == "win32" and self._job is not None:
             _close_handle(self._job)
             self._job = None
@@ -378,7 +380,9 @@ def serve(handle: Callable[[Any], Any]) -> None:
     written to standard output, by `handle` or by a process it starts, goes to standard
     error instead, so that only the answer reaches the parent's reader.
     """
-    answer = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
+    # Unbuffered, so that an answer the parent no longer reads leaves nothing behind to
+    # flush when the interpreter ends.
+    answer = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
     sys.stdout.flush()
     if sys.stderr is not None:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -401,14 +405,25 @@ def serve(handle: Callable[[Any], Any]) -> None:
     except Exception as exc:                    # noqa: BLE001, reported to the parent
         data = pickle.dumps(error_response(exc))
     try:
-        answer.write(data)
-        answer.flush()
-    except BrokenPipeError:
-        pass                                    # the parent has gone; nothing reads it
+        view = memoryview(data)
+        while view:
+            view = view[answer.write(view):]
+    except OSError as exc:
+        if not _reader_gone(exc):
+            raise
     try:
         answer.close()
-    except BrokenPipeError:
-        pass
+    except OSError as exc:
+        if not _reader_gone(exc):
+            raise
+
+
+def _reader_gone(exc: OSError) -> bool:
+    """Whether `exc`, raised by a write to a pipe, says that nothing reads the pipe any
+    more: `BrokenPipeError`, or on Windows `EINVAL`, which a write to a pipe whose reader
+    has closed raises there."""
+    return isinstance(exc, BrokenPipeError) or (
+        sys.platform == "win32" and exc.errno == errno.EINVAL)
 
 
 def error_response(exc: BaseException) -> dict:

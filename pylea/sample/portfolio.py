@@ -112,7 +112,7 @@ def decide_scalar(dpp, values: np.ndarray, *, rel_err: float, confidence: float,
     origin = origin_of(affine)
 
     def compute() -> Estimate:
-        started = time.monotonic()
+        started = time.perf_counter()
         deadline = Deadline.after(max_time)
         choice = _choose(
             dpp, values, lambda report: report.predicted_seconds, rel_err=rel_err,
@@ -168,7 +168,7 @@ def decide_table(dpp, *, rel_err: float, confidence: float, floor: float | None,
     floor = resolved_floor(rel_err, floor, dpp.output_types())
 
     def compute() -> ExactTable | TableOutcome:
-        started = time.monotonic()
+        started = time.perf_counter()
         deadline = Deadline.after(max_time)
         guard = None
         if out_bits > TABLE_OUT_BITS_CAP:
@@ -361,7 +361,7 @@ def _race(dpp, compile_kwargs: dict, trace: list[str], started: float, sampled,
         response = lane.response()
         value = from_matrix(response["array"], response["scale"])
         trace.append(f"auto: the exact engine answered first, in {lane.elapsed:.3g} s")
-        return from_exact(value, time.monotonic() - started)
+        return from_exact(value, time.perf_counter() - started)
     finally:
         if lane is not None:
             lane.kill()
@@ -409,13 +409,13 @@ def _greedy_bound(dpp, compile_kwargs: dict, trace: list[str]) -> float:
     """
     from pylea.compile.cost import predicted_ms
 
-    started = time.monotonic()
+    started = time.perf_counter()
     compiled = dpp.compiled(**{**probe_compile_kwargs(compile_kwargs), "kappa": None})
     bound = predicted_ms(compiled.plans) / 1e3
     trace.append(f"auto: lower bound on the exact engine's predicted time {bound:.3g} s, "
                  f"from a "
                  f"greedy contraction tree without slicing (found in "
-                 f"{time.monotonic() - started:.3g} s)")
+                 f"{time.perf_counter() - started:.3g} s)")
     return bound
 
 
@@ -424,7 +424,7 @@ def _greedy_prediction(dpp, compile_kwargs: dict, trace: list[str]) -> float:
     the per-DPP compiled cache."""
     from pylea.compile.cost import predicted_ms
 
-    started = time.monotonic()
+    started = time.perf_counter()
     try:
         compiled = dpp.compiled(**probe_compile_kwargs(compile_kwargs))
     except ExactInferenceTooLarge:
@@ -432,7 +432,7 @@ def _greedy_prediction(dpp, compile_kwargs: dict, trace: list[str]) -> float:
         return math.inf
     prediction = predicted_ms(compiled.plans) / 1e3
     trace.append(f"auto: predicted exact engine time {prediction:.3g} s, from a greedy "
-                 f"contraction tree (found in {time.monotonic() - started:.3g} s)")
+                 f"contraction tree (found in {time.perf_counter() - started:.3g} s)")
     return prediction
 
 
@@ -529,4 +529,4 @@ def _answer_exact(dpp, exact_value, exact_from_matrix, wrap, deadline: Deadline,
             trace.append(f"auto: {exc}; the sampling engine answers in the remaining time")
             return fallback()
         value = exact_from_matrix(array, scale)
-    return wrap(value, time.monotonic() - started)
+    return wrap(value, time.perf_counter() - started)
