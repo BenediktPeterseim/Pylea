@@ -60,6 +60,11 @@ PILOT_IID_BATCHES = 2
 PILOT_SWEEPS = 16
 PILOT_SWEEP_PARTICLES = 512
 
+# Under a deadline, the share of the time left when the pilot starts that its batches
+# after the first may fill, so that the certified run, whose samples alone enter the
+# interval, has the rest.  Chosen, not fitted.
+PILOT_DEADLINE_SHARE = 0.5
+
 # Feasibility guards, from counts alone.  Policy bounds, not fitted.  Above the op cap one
 # batch on the byte lane costs seconds; above the width cap a sampled table would certify
 # over a million entries.  The width cap equals `pylea.syntax.method.MAX_OUTPUT_BITS`, the

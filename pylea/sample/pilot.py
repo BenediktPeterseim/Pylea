@@ -29,10 +29,11 @@ A `pylea.sample.run.Deadline` bounds the pilot itself.  A deadline already expir
 entry draws nothing: the report's `drawn` is 0, its predictions are infinite, and the
 certified run then reports the vacuous interval.  Otherwise, under a finite deadline the
 first i.i.d. batch is a calibration batch of 64 samples, whose measured time per sample
-sizes the later batches to the remaining time, as the certified run sizes its steps; the
-sweep section runs only where one sweep of `PILOT_SWEEP_PARTICLES` particles, priced
-from that time, fits in what remains, and skipped sweeps leave the sweep prediction
-infinite.  Under a deadline the pilot's statistics therefore depend on timing, which is
+sizes the later batches to the pilot's share of the deadline, `PILOT_DEADLINE_SHARE` of
+the time left when it starts, so that the certified run, whose samples alone enter the
+interval, has the rest; the sweep section runs only where one sweep of
+`PILOT_SWEEP_PARTICLES` particles, priced from that time, fits in that share, and skipped
+sweeps leave the sweep prediction infinite.  Under a deadline the pilot's statistics therefore depend on timing, which is
 consistent with the reproducibility contract: bit-reproducibility is promised only
 without `max_time`, and without a deadline the pilot runs its full batches.
 
@@ -58,8 +59,8 @@ if TYPE_CHECKING:
 
 from pylea.sample import cost_model
 from pylea.sample.cost_model import (
-    MEMORY_CAP_BYTES, PACKED_SPEEDUP, PILOT_IID_BATCHES, PILOT_SWEEP_PARTICLES,
-    PILOT_SWEEPS, SWEEP_N_FACTOR, SWEEP_N_MIN, batch_size,
+    MEMORY_CAP_BYTES, PACKED_SPEEDUP, PILOT_DEADLINE_SHARE, PILOT_IID_BATCHES,
+    PILOT_SWEEP_PARTICLES, PILOT_SWEEPS, SWEEP_N_FACTOR, SWEEP_N_MIN, batch_size,
 )
 from pylea.sample.sweep import SweepProgram
 
@@ -203,15 +204,17 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
     counts = np.zeros(1 << program.out_bits)
     bounded = deadline.expires_at is not None
     started = time.perf_counter()
+    # The pilot's own share of the deadline; the certified run has the rest.
+    allowed = PILOT_DEADLINE_SHARE * deadline.remaining()
     # Under a deadline a calibration batch of 64 samples, the packed kernel's word
     # width, comes first, and its time per sample sizes the later batches, each run
-    # only where it fits in whole words.
+    # only where it fits in whole words in the pilot's share.
     for k in range(PILOT_IID_BATCHES + bounded):
         size = batch
         if bounded:
             took = time.perf_counter() - started
             fit = 64 if k == 0 else (batch if took <= 0.0 else
-                                     int(deadline.remaining() * drawn / took))
+                                     int(max(0.0, allowed - took) * drawn / took))
             size = min(batch, fit - fit % 64)
         if size == 0:
             break
@@ -254,7 +257,8 @@ def run_pilot(program: SweepProgram, values: np.ndarray, *, rel_err: float,
     # One sweep costs about as many byte-lane samples as it has particles.
     sweep_estimate = PILOT_SWEEP_PARTICLES * iid_seconds * (PACKED_SPEEDUP if packable
                                                             else 1.0)
-    if program.conditions and sweep_estimate <= deadline.remaining():
+    if program.conditions and sweep_estimate <= max(
+            0.0, allowed - (time.perf_counter() - started)):
         den_values: list[float] = []
         num_values: list[float] = []
         fraction_sum = np.zeros(program.n_stages)

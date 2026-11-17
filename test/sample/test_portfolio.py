@@ -678,4 +678,5 @@ def test_seeded_auto_results_with_different_compile_options_are_cached_apart():
                  order_finder=GreedyOrderFinder())
     assert again.trace[-1].startswith("result cache")
     assert not other.trace[-1].startswith("result cache")
-    assert float(first) == float(other)
+    # The other contraction tree rounds differently, in the last digits only.
+    assert float(other) == pytest.approx(float(first), rel=1e-12)

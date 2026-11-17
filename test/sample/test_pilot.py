@@ -175,3 +175,38 @@ def test_the_table_price_grows_with_the_entry_count_and_falls_with_the_binding_m
     assert price(0.1, 4) < price(0.1, 64) < price(0.1, 1024)
     assert price(0.1, 4) < price(0.01, 4) < price(0.001, 4)
     assert price(0.0, 4) == math.inf
+
+
+def test_a_pilot_under_a_deadline_leaves_the_certified_run_its_share_of_the_time(
+        monkeypatch):
+    import time
+
+    import pylea.sample.run as run_module
+    from pylea.sample.cost_model import PILOT_DEADLINE_SHARE
+    from pylea.sample.run import Deadline
+
+    # Every batch costs 50 ms whatever its size, as on a large DPP, where the work per
+    # assignment dominates; a pilot filling the whole deadline would run a second batch.
+    class Slow:
+        def __init__(self, executor):
+            self.executor = executor
+
+        def run(self, *args, **kwargs):
+            time.sleep(0.05)
+            return self.executor.run(*args, **kwargs)
+
+    packed_or_byte = run_module.packed_or_byte
+    monkeypatch.setattr(run_module, "packed_or_byte", lambda p: Slow(packed_or_byte(p)))
+
+    @DPP
+    def coin() -> Bool:
+        return flip(0.3)
+
+    body = schedule(unfold(coin.program()))
+    limit = 0.12
+    started = time.perf_counter()
+    report = run_pilot(SweepProgram(body), EVENT, rel_err=0.01, confidence=0.95,
+                       unfolded_ops=len(body.ops), seed_sequence=np.random.SeedSequence(0),
+                       deadline=Deadline.after(limit))
+    assert report.drawn == 64
+    assert time.perf_counter() - started < PILOT_DEADLINE_SHARE * limit + 0.03

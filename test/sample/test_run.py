@@ -211,12 +211,13 @@ def test_every_seed_of_monty_hall_terminates_by_sampling():
 
 
 @pytest.mark.slow
-def test_a_prepared_large_dpp_respects_a_one_second_deadline_within_half_a_second():
+def test_a_prepared_large_dpp_overruns_a_one_second_deadline_by_at_most_one_step():
     import time
     import warnings
 
     from pylea import prob
     from pylea.sample.query import prepared
+    from pylea.sample.run import packed_or_byte
 
     @DPP
     def chain() -> Bool:
@@ -225,15 +226,20 @@ def test_a_prepared_large_dpp_respects_a_one_second_deadline_within_half_a_secon
             acc = acc & (flip(0.999) | flip(0.5))
         return acc
 
-    prepared(chain)
-    started = time.monotonic()
+    program, _ops = prepared(chain)
+    # The smallest step, 64 samples, of this DPP: its time is mostly per assignment, so it
+    # is the largest overrun a deadline allows, and it differs between machines.
+    executor = packed_or_byte(program)
+    started = time.perf_counter()
+    executor.run(64, np.random.default_rng(0), resample=False, squares=True)
+    step = time.perf_counter() - started
+    started = time.perf_counter()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         p = prob(chain, method="smc", max_time=1.0, seed=0)
-    took = time.monotonic() - started
-    assert took < 1.5, (took, p.n_samples, p.trace)
+    took = time.perf_counter() - started
+    assert took < 1.0 + 1.5 * step + 0.3, (took, step, p.n_samples, p.trace)
     assert p.low <= float(p) <= p.high
-
 
 
 def test_a_run_with_resampling_reads_its_interval_a_logarithmic_number_of_times(
