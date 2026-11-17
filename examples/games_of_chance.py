@@ -43,7 +43,7 @@ def win_car() -> Bool:
     opened_door = door_that_host_opens(door_with_car)
     # You observe that the host has opened door 3.
     observe(opened_door == 3)
-    # You switch our choice from door 1 to the only remaining choice, door 2.
+    # You switch your choice from door 1 to the only remaining choice, door 2.
     chosen_door = 2
     # The event that you win, i.e. your chosen door is the door with the car:
     return door_with_car == chosen_door
@@ -56,8 +56,7 @@ prob(win_car)
 #
 # The probability that a hand beats one opponent at showdown, every unseen card dealt at
 # random.  The rules of the game are written as a DPP in `pylea.examples.holdem`.  The
-# answer is an estimate with confidence intervals; `low` and `high` bound it at confidence
-# 0.95.
+# answer is an estimate; `low` and `high` bound the true value with probability 0.95.
 
 # %%
 from pylea.examples.holdem import hero_wins

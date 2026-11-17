@@ -76,9 +76,9 @@ def test_a_variable_the_source_gives_no_name_is_labelled_by_its_type():
     assert labels == ["c", "SprinklerState"]        # `c` is the model's own parameter
 
 
-def test_two_variables_that_would_share_a_label_are_told_apart_by_their_index():
+def test_variables_that_would_share_a_label_are_numbered_among_themselves():
     labels = [n.label for n in simple.two_input_output_dpp.dependency_graph().sketch.nodes]
-    assert labels == ["x", "y", "Bool 2", "Bool 3"]
+    assert labels == ["x", "y", "Bool 0", "Bool 1"]
 
 
 def test_a_variable_returned_twice_is_one_box():
@@ -88,6 +88,23 @@ def test_a_variable_returned_twice_is_one_box():
         return x, x
 
     assert [n.label for n in twice.dependency_graph().sketch.nodes] == ["x"]
+
+
+def test_a_value_handed_back_under_another_variable_is_drawn_with_one_arrow_from_the_first():
+    @DPP
+    def both(x: Bool) -> tuple[Bool, Bool]:
+        return x, x
+
+    @DPP
+    def pair(x: Bool) -> tuple[Bool, Bool]:
+        return x, both(x)[0]
+
+    @DPP
+    def handed_back() -> tuple[Bool, Bool]:
+        first, second = pair(flip(0.5))
+        return first, second
+
+    assert wires_between(handed_back.dependency_graph().sketch) == [("first", "second")]
 
 
 def test_an_input_returned_unchanged_is_one_box_and_is_drawn_as_given():
@@ -169,6 +186,23 @@ def test_a_variable_is_drawn_above_the_ones_computed_from_it():
     height = {n.label: y for n, y in zip(graph.sketch.nodes, graph.placement.y)}
     assert height["cloudiness"] > height["rain"] > height["grass_wetness"]
     assert height["cloudiness"] > height["sprinkler_state"] > height["grass_wetness"]
+
+
+def test_a_variable_computed_from_nothing_is_drawn_just_above_what_is_computed_from_it():
+    """The ranking of a dot diagram, which keeps a long arrow from crossing the picture."""
+    @DPP
+    def chain() -> tuple[Bool, Bool, Bool, Bool, Bool]:
+        a = flip(0.5)
+        b = a & flip(0.5)
+        c = b | flip(0.5)
+        late = flip(0.3)
+        return a, b, c, late, c & late
+
+    graph = chain.dependency_graph()
+    rows = sorted({round(y, 6) for y in graph.placement.y}, reverse=True)
+    row = {n.label: rows.index(round(y, 6))
+           for n, y in zip(graph.sketch.nodes, graph.placement.y)}
+    assert [row[label] for label in ("a", "b", "c", "late", "Bool")] == [0, 1, 2, 2, 3]
 
 
 def test_a_wire_stops_on_the_outline_of_the_box_it_points_at():

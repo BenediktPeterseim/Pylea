@@ -8,10 +8,15 @@ can force a stage to run rather than wait for an instance expensive enough to tr
 The dominator lift's budget is not timed here either, since a test asserting how far a pass
 gets in a given number of milliseconds asserts the speed of the machine it runs on.
 """
+from unittest import mock
+
 import numpy as np
 import pytest
 
-from pylea.compile.planner import Compilation, plan_compilation
+import pylea.compile.planner as planner
+from pylea.compile.planner import (
+    BEST_OF, GREEDY, LONGER_SEARCH, SIMPLIFIED, Compilation, plan_compilation,
+)
 from pylea.eval.interp import evaluate
 from pylea.ir.body import BodyBuilder
 from pylea.ir.prim import Prim
@@ -20,8 +25,10 @@ from pylea.ir.reference import TooLarge, semantics
 from test.compile.random_programs import random_program
 
 def _forced(prog, **kwargs):
-    """`plan_compilation` with every threshold at zero, so the whole ladder runs."""
-    return plan_compilation(prog, t_search=0.0, t_escalate=0.0, **kwargs)
+    """`plan_compilation` with every threshold at zero and no allowance for the search's
+    own greedy trees, so the whole ladder runs."""
+    with mock.patch.object(planner, "C_PROBES", 0):
+        return plan_compilation(prog, t_search=0.0, t_escalate=0.0, **kwargs)
 
 
 @pytest.fixture
@@ -52,7 +59,7 @@ def _value(c: Compilation) -> np.ndarray:
 def test_a_cheap_instance_pays_for_no_search():
     """The whole point: an instance that evaluates in microseconds pays for no order search."""
     ran = " ".join(plan_compilation(_chain(6), kappa=28).trace)
-    assert "C best-of" not in ran and "D auto-hq" not in ran, ran
+    assert BEST_OF not in ran and LONGER_SEARCH not in ran, ran
 
 
 def test_simplification_is_skipped_when_scoring_it_would_cost_more_than_evaluating():
@@ -63,7 +70,7 @@ def test_simplification_is_skipped_when_scoring_it_would_cost_more_than_evaluati
     """
     c = plan_compilation(_chain(6), kappa=28)
     assert c.predicted_ms < c.probe_ms                  # the premise, not an assumption
-    assert "B simplify" not in " ".join(c.trace), c.trace
+    assert SIMPLIFIED not in " ".join(c.trace), c.trace
 
 
 def test_simplification_runs_regardless_once_asked_to_always():
@@ -73,28 +80,28 @@ def test_simplification_runs_regardless_once_asked_to_always():
     overrides that decision and not merely that the stage can run at all.
     """
     prog = _chain(6)
-    assert "B simplify" not in " ".join(plan_compilation(prog, kappa=28).trace)
+    assert SIMPLIFIED not in " ".join(plan_compilation(prog, kappa=28).trace)
     forced = plan_compilation(prog, kappa=28, simplify="always")
-    assert "B simplify" in " ".join(forced.trace), forced.trace
+    assert SIMPLIFIED in " ".join(forced.trace), forced.trace
 
 
 def test_simplification_is_not_otherwise_gated(free_probes):
     """Nothing else decides whether it runs: the budget sets how long, never whether."""
     ran = " ".join(plan_compilation(_chain(6), kappa=28).trace)
-    assert "B simplify" in ran, ran
+    assert SIMPLIFIED in ran, ran
 
 
 def test_every_stage_runs_when_the_thresholds_are_zero(free_probes):
     c = _forced(_chain(6), kappa=28)
     ran = " ".join(c.trace)
-    for stage in ("A greedy", "B simplify", "C best-of", "D auto-hq"):
+    for stage in (GREEDY, SIMPLIFIED, BEST_OF, LONGER_SEARCH):
         assert stage in ran, c.trace
 
 
 def test_a_stage_that_does_not_help_is_discarded():
     """Try-and-keep-if-better is what makes a badly set threshold merely wasteful."""
     c = _forced(_chain(6), kappa=28)
-    assert "  discarded" in c.trace, c.trace
+    assert any(line.endswith("not kept") for line in c.trace), c.trace
     assert c.cost <= plan_compilation(_chain(6), kappa=28).cost
 
 
@@ -117,7 +124,7 @@ def test_simplification_can_be_held_out():
     prog = intern(_chain(6))
     c = _forced(prog, kappa=28, simplify=False)
     assert c.program == prog
-    assert "B simplify" not in " ".join(c.trace)
+    assert SIMPLIFIED not in " ".join(c.trace)
 
 
 def test_stage_d_is_time_bounded(monkeypatch):
@@ -128,8 +135,6 @@ def test_stage_d_is_time_bounded(monkeypatch):
     from compiling.  What is asserted is the wiring: the planner constructs the finder with
     a wall-clock bound.
     """
-    import pylea.compile.planner as planner
-
     built = {}
 
     class Recording(planner.AdaptiveOrderFinder):
@@ -142,19 +147,18 @@ def test_stage_d_is_time_bounded(monkeypatch):
     assert built.get("max_time") is not None
 
 
-def test_a_failing_stage_leaves_the_earlier_plan_in_place():
+def test_a_failing_stage_leaves_the_earlier_plan_in_place(monkeypatch):
     """A search is an optimisation; losing one must not lose the compilation."""
     class Broken:
+        def __init__(self, finder, limit):
+            pass
+
         def find(self, indices, output, size, *, kappa=None):
             raise RuntimeError("no order today")
 
-    import pylea.compile.planner as planner
-    original = planner.SlicedBestOfOrderFinder
-    planner.SlicedBestOfOrderFinder = Broken
-    try:
-        c = plan_compilation(_chain(6), kappa=28, t_search=0.0, t_escalate=1e18)
-    finally:
-        planner.SlicedBestOfOrderFinder = original
+    monkeypatch.setattr(planner, "BoundedOrderFinder", Broken)
+    monkeypatch.setattr(planner, "C_PROBES", 0)
+    c = plan_compilation(_chain(6), kappa=28, t_search=0.0, t_escalate=1e18)
     assert "failed" in " ".join(c.trace), c.trace
     assert np.allclose(_value(c), _value(plan_compilation(_chain(6), kappa=28)))
 
@@ -184,3 +188,190 @@ def test_the_planned_compilation_computes_the_right_factor(prog):
     array, scale = evaluate(c.plans, c.root)
     got = np.asarray(array, dtype=float) * float(np.exp(scale))
     assert np.allclose(got, semantics(prog), atol=1e-12)
+
+
+def test_the_compilation_trace_uses_the_terms_of_the_documentation():
+    import re
+
+    c = _forced(_chain(6), kappa=28)
+    for line in c.trace:
+        assert line.startswith("compilation: "), line
+        assert not re.search(r"\b(stage|plan|ladder|probe)", line), line
+
+
+# --------------------------------------------------------------- limits and bounds
+
+def _xor_grid(n: int) -> Program:
+    """An ``n`` by ``n`` grid of coin flips, each XOR-ed with its upper and left
+    neighbours, conditioned on the last cell; its treewidth grows with ``n``."""
+    from pylea import DPP, Bool, flip, observe
+
+    @DPP
+    def grid() -> Bool:
+        g = [[None] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                c = flip(0.3)
+                if i:
+                    c = c ^ g[i - 1][j]
+                if j:
+                    c = c ^ g[i][j - 1]
+                g[i][j] = c
+        observe(g[n - 1][n - 1])
+        return g[0][0]
+
+    return grid.program()
+
+
+def _same_coin_returned(n: int) -> Program:
+    b = BodyBuilder()
+    (w,) = b.emit(Prim.flip(0.5), ())
+    return Program((b.finish((), (w,) * n),), 0)
+
+
+def test_a_dpp_whose_outputs_alone_exceed_the_width_bound_is_refused_before_any_search(
+        monkeypatch):
+    import time
+
+    from pylea.compile.lower import ExactInferenceTooLarge
+    from pylea.compile.order import GreedyOrderFinder
+
+    def no_search(*args, **kwargs):
+        raise AssertionError("a contraction tree was searched for")
+
+    monkeypatch.setattr(GreedyOrderFinder, "find", no_search)
+    started = time.monotonic()
+    with pytest.raises(ExactInferenceTooLarge) as refusal:
+        plan_compilation(_same_coin_returned(40), kappa=28, name="wide")
+    assert time.monotonic() - started < 1.0
+    message = str(refusal.value)
+    assert message.startswith("exact inference on 'wide' needs a tensor with 2**40 entries "
+                              "(8 TiB of memory); the limit is 2**29 entries (4 GiB)")
+    assert "output variables alone have 2**40 joint values" in message
+    assert "kappa=40" in message
+
+
+def test_kappa_raises_the_size_limit_and_none_removes_it():
+    assert plan_compilation(_same_coin_returned(30), kappa=30).plans
+    assert plan_compilation(_same_coin_returned(31), kappa=None).plans
+
+
+def test_a_plan_estimated_beyond_the_time_bound_is_refused_with_its_estimate(monkeypatch):
+    from pylea.compile.lower import ExactInferenceTooSlow
+
+    monkeypatch.setattr(planner, "MAX_PREDICTED_MS", 1.0)
+    prog = _xor_grid(14)
+    with pytest.raises(ExactInferenceTooSlow) as refusal:
+        plan_compilation(prog, kappa=28, simplify=False, t_search=float("inf"),
+                         t_escalate=float("inf"), name="grid")
+    message = str(refusal.value)
+    assert message.startswith("exact inference on 'grid' is estimated to take about ")
+    assert "; the limit is 0.001 s." in message
+    assert refusal.value.trace and refusal.value.trace[0].startswith("compilation: ")
+
+
+def test_a_plan_left_unsliced_by_the_cost_cap_is_refused_as_too_slow_not_too_wide(
+        monkeypatch):
+    from pylea.compile.lower import ExactInferenceTooSlow
+
+    monkeypatch.setattr(planner, "cost_for_ms", lambda ms: 10.0)
+    with pytest.raises(ExactInferenceTooSlow) as refusal:
+        plan_compilation(_xor_grid(14), kappa=4, simplify="always",
+                         t_search=float("inf"), t_escalate=float("inf"))
+    assert "longer than the limit of 11.6 days" in str(refusal.value)
+    trace = refusal.value.trace
+    assert any(SIMPLIFIED in line for line in trace), trace
+    assert all("not sliced" in line for line in trace if GREEDY in line), trace
+
+
+def test_a_runnable_plan_is_preferred_to_one_left_unsliced_by_the_cost_cap(monkeypatch):
+    """The cap leaves stage A's tree unsliced; the search of stage C slices its own."""
+    monkeypatch.setattr(planner, "cost_for_ms", lambda ms: 10.0)
+    monkeypatch.setattr(planner, "C_PROBES", 0)
+    c = plan_compilation(_chain(12), kappa=1, simplify=False, t_search=0.0,
+                         t_escalate=float("inf"))
+    assert c.runnable
+    assert c.trace[0].endswith("not sliced as its cost exceeds the time limit"), c.trace
+    assert c.trace[-1].startswith(f"compilation: {BEST_OF}") and \
+        c.trace[-1].endswith(", kept"), c.trace
+    assert np.allclose(_value(c), _value(plan_compilation(_chain(12), kappa=None)))
+
+
+def test_stage_c_is_skipped_where_no_contraction_tree_can_lower_the_estimate():
+    """A chain's estimate is its step count, which every contraction tree shares."""
+    from pylea.compile.cost import search_gain_ms
+
+    c = plan_compilation(_chain(2000), kappa=28, simplify=False, t_search=1.0)
+    assert c.predicted_ms > 1.0 > search_gain_ms(c.plans)       # the premise
+    assert BEST_OF not in " ".join(c.trace), c.trace
+
+
+def test_stages_c_and_d_end_within_their_bounds(monkeypatch):
+    import time
+
+    import pylea.compile.order as order
+    from pylea.compile.lower import ExactInferenceTooSlow
+
+    monkeypatch.setattr(planner, "T_STAGE_C_SECONDS", 1.0)
+    monkeypatch.setattr(planner, "T_STAGE_D_SECONDS", 1.0)
+    monkeypatch.setattr(planner, "BOUND_GRACE_S", 1.0)
+    monkeypatch.setattr(order, "BOUND_GRACE_S", 1.0)
+    prog = _xor_grid(40)
+    started = time.monotonic()
+    with pytest.raises(ExactInferenceTooSlow) as refusal:
+        plan_compilation(prog, kappa=28, simplify=False)
+    elapsed = time.monotonic() - started
+    trace = " ".join(refusal.value.trace)
+    assert BEST_OF in trace and LONGER_SEARCH in trace, trace
+    assert elapsed < 10.0
+
+
+def test_stage_d_runs_one_bounded_search_for_all_bodies(monkeypatch):
+    import pylea.compile.order as order
+    from pylea.compile._process_tree import start_worker
+
+    started = []
+
+    def counted(module):
+        started.append(module)
+        return start_worker(module)
+
+    monkeypatch.setattr(order, "start_worker", counted)
+    monkeypatch.setattr(planner, "C_PROBES", 0)
+    inner = []
+    for k in range(4):
+        b = BodyBuilder()
+        (p,) = b.emit(Prim.flip(0.1 * (k + 1)), ())
+        (q,) = b.emit(Prim.flip(0.6), ())
+        (x,) = b.emit(Prim.and_(), (p, q))
+        (y,) = b.emit(Prim.and_(), (x, p))
+        inner.append(b.finish((), (y,)))
+    outer = BodyBuilder(inner)
+    outs = [outer.emit(i, ())[0] for i in range(4)]
+    (w,) = outer.emit(Prim.and_(), (outs[0], outs[1]))
+    (v,) = outer.emit(Prim.and_(), (outs[2], outs[3]))
+    (r,) = outer.emit(Prim.and_(), (w, v))
+    prog = Program(tuple(inner) + (outer.finish((), (r,)),), 4)
+    c = plan_compilation(prog, kappa=28, simplify=False, t_search=float("inf"),
+                         t_escalate=0.0)
+    assert len(c.plans) == 5
+    assert LONGER_SEARCH in " ".join(c.trace), c.trace
+    assert started == ["pylea.compile._order_worker"]
+
+
+def test_a_failed_escalation_keeps_the_greedy_tree(monkeypatch):
+    import cotengra as ctg
+
+    from pylea.compile.lower import compile_program
+    from pylea.compile.order import AdaptiveOrderFinder
+
+    def fails(self, *args, **kwargs):
+        raise KeyError("tree")
+
+    monkeypatch.setattr(ctg.AutoHQOptimizer, "search", fails)
+    monkeypatch.setattr(ctg.AutoOptimizer, "search", fails)
+    prog = _chain(6)
+    plans, root = compile_program(prog, AdaptiveOrderFinder(escalate_cost=0.0), kappa=28)
+    array, scale = evaluate(plans, root)
+    np.testing.assert_allclose(np.asarray(array, dtype=float).reshape(-1) * np.exp(scale),
+                               semantics(prog).reshape(-1), rtol=1e-12)

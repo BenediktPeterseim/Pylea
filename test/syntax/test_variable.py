@@ -303,3 +303,225 @@ def test_at_least_against_a_constant_holds_on_the_right_states():
     expected = np.array([[1, 1, 0, 0],
                          [0, 0, 1, 1]], dtype=float)
     np.testing.assert_allclose(m, expected, atol=1e-10)
+
+
+# --- values are checked against the type's values ---
+
+def test_an_enum_of_mixed_types_compares_with_each_of_its_elements():
+    from pylea import prob
+
+    class Mixed(Enum):
+        elements = [0, "high"]
+
+    @DPP
+    def is_high() -> Bool:
+        return Mixed.uniform() == "high"
+
+    @DPP
+    def is_zero() -> Bool:
+        return Mixed.uniform() == 0
+
+    assert prob(is_high) == pytest.approx(0.5)
+    assert prob(is_zero) == pytest.approx(0.5)
+
+
+def test_an_enum_of_numbers_compares_with_an_int_and_a_float_alike():
+    from pylea import prob
+
+    class Levels(Enum):
+        elements = [0.5, 1, 2]
+
+    @DPP
+    def at_one_as_int() -> Bool:
+        return Levels.uniform() == 1
+
+    @DPP
+    def at_one_as_float() -> Bool:
+        return Levels.uniform() == 1.0
+
+    assert prob(at_one_as_int) == pytest.approx(1 / 3)
+    assert prob(at_one_as_float) == pytest.approx(1 / 3)
+
+
+def test_a_numpy_scalar_is_accepted_wherever_its_python_value_is():
+    from pylea import UInt, prob
+
+    class Nibble(UInt):
+        width = 4
+
+    @DPP
+    def both() -> Bool:
+        return (Direction.uniform() == np.str_("N")) | (Nibble.const(np.int64(3)) == np.int8(3))
+
+    assert prob(both) == 1.0
+
+
+def test_a_value_that_is_not_an_element_is_refused_with_the_type_named():
+    with pytest.raises(ValueError, match="'X' is not an element of Color"):
+        @DPP
+        def typo() -> Bool:
+            return Color.uniform() == "X"
+    with pytest.raises(ValueError, match="'X' is not an element of Color"):
+        @DPP
+        def constant() -> Color:
+            return Color.const("X")
+
+
+def test_adding_variables_of_two_types_names_the_operation_and_both_types():
+    from pylea import UInt
+
+    class U4(UInt):
+        width = 4
+
+    class V4(UInt):
+        width = 4
+
+    with pytest.raises(TypeError, match="Cannot add a U4 variable and a V4 variable"):
+        @DPP
+        def mixed() -> U4:
+            return U4.const(1) + V4.const(2)
+    with pytest.raises(TypeError, match="Cannot compare a U4 variable and a V4 variable"):
+        @DPP
+        def compared() -> Bool:
+            return U4.const(1) < V4.const(2)
+
+
+def test_a_python_type_given_as_data_type_is_refused_with_bool_suggested():
+    with pytest.raises(TypeError, match="use Bool"):
+        @DPP
+        def as_python_bool() -> Bool:
+            return Color.uniform().match({"R": True, "G": False, "B": False}, data_type=bool)
+
+
+def test_a_subclass_holding_the_same_values_compares_with_its_base():
+    from pylea import prob
+
+    class Renamed(Color):
+        pass
+
+    @DPP
+    def same() -> Bool:
+        return Color.const("G") == Renamed.const("G")
+
+    assert prob(same) == 1.0
+
+
+def test_a_subclass_with_reordered_elements_is_refused_in_a_comparison():
+    class Reordered(Color):
+        elements = ["B", "G", "R"]
+
+    with pytest.raises(TypeError, match="Cannot compare a (Color|Reordered) variable and a (Color|Reordered)"):
+        @DPP
+        def mixed() -> Bool:
+            return Color.const("R") == Reordered.const("R")
+
+
+# --- one comparator per relation, shared by width ---
+
+def test_each_ordering_comparison_records_a_single_comparator():
+    from pylea import UInt
+    from pylea.ir.program import op_count
+
+    class Nibble(UInt):
+        width = 4
+
+    counts = {}
+    for name, relation in [("<", lambda x: x < 5), ("<=", lambda x: x <= 5),
+                           (">", lambda x: x > 5), (">=", lambda x: x >= 5)]:
+        @DPP
+        def compared(x: Nibble) -> Bool:
+            return relation(x)
+        counts[name] = op_count(compared.program())
+    for name in ("<=", ">", ">="):
+        assert counts["<"] <= counts[name] <= counts["<"] + 1, counts
+
+
+def test_every_ordering_agrees_with_python_on_constants_and_variables():
+    from pylea import UInt
+
+    class Three(UInt):
+        width = 3
+
+    for a in range(8):
+        for b in range(-1, 10):
+            @DPP
+            def relations() -> tuple[Bool, Bool, Bool, Bool, Bool, Bool]:
+                x = Three.const(a)
+                y = Three.const(b) if 0 <= b < 8 else b
+                return x < y, x <= y, x > y, x >= y, x == y, x != y
+            pattern = int(np.argmax(relations.distribution()))
+            got = [bool((pattern >> (5 - i)) & 1) for i in range(6)]
+            assert got == [a < b, a <= b, a > b, a >= b, a == b, a != b], (a, b)
+
+
+def test_tracing_keeps_no_type_alive():
+    import gc
+    import weakref
+    from pylea import UInt, count, flip, pick, prob
+
+    def define_and_drop():
+        class Temporary(UInt):
+            width = 3
+
+        class Cards(Enum):
+            elements = ["a", "b", "c"]
+
+        @DPP
+        def uses_everything() -> Bool:
+            x = Temporary.uniform_bits() + 1
+            c = count(flip(0.5) for _ in range(3))
+            (p, q), _ = pick([Cards.const(e) for e in Cards], 2)
+            return (x < 3) & (c >= 2) & (p == q) & (Cards.uniform() <= "b")
+
+        prob(uses_everything)
+        return weakref.ref(Temporary), weakref.ref(Cards)
+
+    refs = define_and_drop()
+    gc.collect()
+    assert all(r() is None for r in refs)
+
+
+def test_types_of_one_width_share_one_comparator_circuit():
+    from pylea.syntax.variable import _comparator_circuit
+
+    class First(Enum):
+        elements = ["a", "b", "c"]
+
+    class Second(Enum):
+        elements = [10, 20, 30, 40]
+
+    @DPP
+    def compared() -> Bool:
+        return (First.uniform() < "b") & (Second.uniform() < 30)
+
+    assert _comparator_circuit("LT", 2) is _comparator_circuit("LT", 2)
+    root = compared.program().bodies[compared.program().root]
+    callees = {op.callee for op in root.ops if isinstance(op.callee, int)}
+    assert len(callees) == 1
+
+
+def test_a_base_type_stands_where_a_subclass_that_reads_the_same_is_expected():
+    from pylea import DPP, Bool, Enum, flip
+
+    class Base(Enum):
+        elements = ["x", "y"]
+
+    class Same(Base):
+        pass
+
+    @DPP
+    def takes(v: Same) -> Bool:
+        return v == "x"
+
+    @DPP
+    def returns() -> Same:
+        return Base.uniform()
+
+    @DPP
+    def mixed() -> Bool:
+        a = flip(0.5).match({True: Same.const("x"), False: Base.const("y")})
+        b = Base.uniform().match({"x": Same.uniform(), "y": Base.uniform()})
+        return takes(a) & (b == "y")
+
+    assert returns.output_types() == (Base,)
+    assert abs(float(mixed.compiled().distribution()[1]) - 0.25) < 1e-12

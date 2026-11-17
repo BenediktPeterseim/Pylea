@@ -5,8 +5,7 @@ probability that at least two share a birthday?
 
 For `n` people the event is a clique of ``n * (n - 1) / 2`` pairwise equality constraints
 over `n` independent 9-bit variables, so its treewidth is far past the reach of standard
-exact inference methods.  Still, Pylea can solve this example using a sampling-based
-algorithm under the hood:
+exact inference methods.  Pylea answers it by sampling:
 
     >>> from pylea import prob
     >>> chance = prob(two_with_same_birthday(n_people=20), rel_err=0.02, seed=0)

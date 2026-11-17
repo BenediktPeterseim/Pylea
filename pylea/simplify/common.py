@@ -27,11 +27,31 @@ the constants of `pylea.simplify.boolean` and the observed values of
 the wires through which those gates are read, the gates as tables, and what the value of
 one wire decides through them.  A literal, in `pos` and `neg`, is a one-bit wire or its
 negation, numbered so that the two literals of one wire differ in the lowest bit.
+
+Three objects derive what the gates of a body force, and each rule uses the one that
+derives what it needs:
+
+  * `Propagation` evaluates the gates forwards from one value of one wire, only as far as
+    its caller asks, and records which readers of that wire each derived value needs.
+    `pylea.simplify.mask` and `pylea.simplify.lift` use it.
+  * The clauses of `pylea.simplify.fold` propagate a set of literals in both directions,
+    from a gate's result to its arguments as well, and report a contradiction.
+    `block_fold` and `bottom_cse` test with them whether the two arguments of a
+    disjunction are ever both true, and `block_fold` its guards.
+  * `pylea.simplify.implication.Implications` holds the implications between every pair
+    of literals at once, including that a disjunction implies what both of its arguments
+    imply, which neither of the others derives.  `pylea.simplify.absorb` uses it.
+
+None of them computes what another does at the same cost: the first two take time up to
+the size of the body for one question, and the third memory up to the square of the
+number of literals for all questions at once.
 """
 from __future__ import annotations
 
 import heapq
+import math
 import string
+import weakref
 from collections import Counter
 from collections.abc import Mapping
 from time import perf_counter
@@ -332,6 +352,55 @@ class Propagation:
         return 1 - decisive, needs.get(a, 0) | needs.get(b, 0) | own
 
 
+# The logs of the smallest positive and the largest float64.
+_LOG_TINY = math.log(float(np.finfo(np.float64).tiny))
+_LOG_MAX = math.log(float(np.finfo(np.float64).max))
+
+# Per primitive, the logs of its smallest positive and its largest entry.
+_RANGES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def log_range(prim: Prim) -> tuple[float, float]:
+    """The logs of `prim`'s smallest positive and largest entries; ``(inf, -inf)`` for a
+    matrix of zeros.
+
+        >>> log_range(Prim.flip(0.25)) == (math.log(0.25), math.log(0.75))
+        True
+    """
+    hit = _RANGES.get(prim)
+    if hit is None:
+        m = np.asarray(prim.matrix, dtype=float)
+        positive = m[m > 0.0]
+        hit = ((math.log(float(positive.min())), math.log(float(positive.max())))
+               if positive.size else (math.inf, -math.inf))
+        _RANGES[prim] = hit
+    return hit
+
+
+def product_in_range(prims, summed_bits: int) -> bool:
+    """Whether a product of the matrices of `prims`, summed over `summed_bits` bits of
+    shared wires, keeps every entry within the normal range of float64.
+
+    Every positive entry of the product is at least the product of the factors' smallest
+    positive entries, and at most the product of their largest times the number of terms
+    summed.  A rule composing two tables without this check could turn entries of 1e-200
+    into zeros, or entries of 1e200 into infinity, before the exact engine, which keeps
+    the range of every value it computes, sees them.
+
+        >>> product_in_range([Prim.flip(0.5), Prim.flip(0.5)], 1)
+        True
+        >>> tiny = Prim.from_matrix([[1e-200], [3e-200]])
+        >>> product_in_range([tiny, tiny], 0)
+        False
+    """
+    ranges = [log_range(p) for p in prims]
+    if any(low == math.inf for low, _high in ranges):
+        return True                         # a factor of zeros makes the product zero
+    low = sum(lo for lo, _hi in ranges)
+    high = sum(hi for _lo, hi in ranges) + summed_bits * math.log(2.0)
+    return low >= _LOG_TINY and high <= _LOG_MAX
+
+
 def composed(a: Op, b: Op, outs: tuple[int, ...], args: tuple[int, ...]) -> Prim:
     """The matrices of `a` and `b` multiplied together, laid out over `outs` then `args`.
 
@@ -499,18 +568,25 @@ class Sweep:
             self._drop_dead(w)
 
     def _drop_dead(self, w: int) -> None:
-        """Nothing, the kept op producing `w` deleted where nothing reads its results."""
-        at = self.made_at.get(w)
-        if at is None or self.reads(w):
-            return
-        op = self.ops[at]
-        if op is None or any(self.reads(x) for x in op.outs):
-            return
-        if not isinstance(op.callee, Prim) or not op.callee.is_discardable:
-            return
-        self._forget(at, op)
-        for a in dict.fromkeys(op.args):
-            self._drop_dead(a)
+        """Nothing, the kept op producing `w` deleted where nothing reads its results, and
+        so on through the ops producing its arguments.
+
+        The ops are visited depth first, arguments in order, from an explicit stack, so a
+        dead chain of any length is deleted without recursion.
+        """
+        stack = [w]
+        while stack:
+            w = stack.pop()
+            at = self.made_at.get(w)
+            if at is None or self.reads(w):
+                continue
+            op = self.ops[at]
+            if op is None or any(self.reads(x) for x in op.outs):
+                continue
+            if not isinstance(op.callee, Prim) or not op.callee.is_discardable:
+                continue
+            self._forget(at, op)
+            stack.extend(reversed(tuple(dict.fromkeys(op.args))))
 
     def _forget(self, at: int, op: Op) -> None:
         self.ops[at] = None

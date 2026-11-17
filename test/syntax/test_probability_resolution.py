@@ -124,3 +124,35 @@ def test_an_enum_refuses_a_state_that_normalising_would_round_to_zero():
 
     with pytest.raises(ValueError, match="underflows to 0"):
         Two.random({"a": 2.0, "b": 5e-324})
+
+
+@pytest.mark.parametrize("p, expected", [(np.float32(0.25), 0.25), (np.float64(0.3), 0.3),
+                                         (np.int64(1), 1.0), (np.int32(0), 0.0)])
+def test_a_numpy_scalar_probability_is_accepted(p, expected):
+    @DPP
+    def coin() -> Bool:
+        return flip(p)
+
+    assert _prob(coin) == expected
+
+
+def test_a_fraction_just_above_one_is_refused():
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        @DPP
+        def coin() -> Bool:
+            return flip(Fraction(10**20 + 1, 10**20))
+
+
+@pytest.mark.parametrize("p", [True, np.False_])
+def test_a_python_bool_is_not_a_probability(p):
+    with pytest.raises(TypeError, match="a bool is not a probability"):
+        @DPP
+        def coin() -> Bool:
+            return flip(p)
+
+
+def test_a_variable_is_not_a_probability_and_match_is_named_instead():
+    with pytest.raises(TypeError, match="written with match"):
+        @DPP
+        def coin() -> Bool:
+            return flip(flip(0.5))  # type: ignore[arg-type]

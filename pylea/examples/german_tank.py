@@ -10,12 +10,13 @@ that estimate in six steps:
      it being at most the fleet size;
   3. `prior`, a uniform draw over the fleet sizes;
   4. `update`, which wraps a belief in one more layer of conditioning on an observed serial;
-  5. `fit`, which applies `update` once per observation, threading the posterior through;
+  5. `fit`, which applies `update` once per observation, each time to the posterior so far;
   6. `probability_mass_function` on the result.
 
-Each capture is modelled as an independent uniform draw, so P(S = s | N = n) is 1/n.  The
-exact likelihood without replacement differs by a factor that approaches 1 as the number of
-captures falls below the fleet size, and the two give the same estimate.
+Each capture is modelled as an independent uniform draw, so P(S = s | N = n) is 1/n.
+Without replacement, the likelihood of `k` distinct serial numbers is
+``1 / (n (n - 1) ... (n - k + 1))`` instead of ``1 / n**k``; the two differ by a factor
+close to 1 where `k` is small against `n`, and give the same most probable fleet size.
 
     >>> posterior = fit([15, 14, 3])
     >>> pmf = probability_mass_function(posterior)

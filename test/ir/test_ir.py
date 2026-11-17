@@ -10,7 +10,7 @@ import pytest
 
 from pylea.ir import (
     ArityError, Body, BodyBuilder, Op, Prim, Program, Tag,
-    intern, is_indicator, is_stochastic, multi_parent_wires, reachable, op_count, shared_reads,
+    intern, is_indicator, is_stochastic, reachable, op_count, shared_reads,
     use_counts, validate,
 )
 from pylea.semantics import matrices
@@ -147,7 +147,7 @@ def test_fanout_and_discard_need_no_primitive():
     (_unused,) = b.emit(Prim.flip(0.1), ())             # discarded
     body = b.finish((), (y,))
     validate(Program((body,), 0))
-    assert multi_parent_wires(body) == 1                # x is read twice
+    assert shared_reads(body) == 1                      # x is read twice
 
 
 def test_a_body_may_return_an_input_unchanged():
@@ -315,3 +315,85 @@ def test_interning_never_adds_ops_or_sharing():
     assert op_count(intern(dup)) <= op_count(dup)
     assert (sum(shared_reads(intern(dup).bodies[i]) for i in reachable(intern(dup)))
             <= sum(shared_reads(dup.bodies[i]) for i in reachable(dup)))
+
+
+# ------------------------------------------------------------- validation and builders
+
+def _two_bodies():
+    """A body returning one coin flip, to be called."""
+    inner = BodyBuilder()
+    (x,) = inner.emit(Prim.flip(0.5), ())
+    return inner.finish((), (x,))
+
+
+def test_validate_reports_a_call_to_an_unknown_body_as_a_value_error():
+    from pylea.ir.body import Body, Op
+    from pylea.ir.program import Program, validate
+
+    body = Body((1,), (), (0,), (Op(5, (), (0,)),))
+    with pytest.raises(ValueError, match="unknown body"):
+        validate(Program((body,), 0))
+
+
+def test_validate_reports_a_wire_outside_the_body_as_a_value_error():
+    from pylea.ir.body import Body, Op
+    from pylea.ir.program import Program, validate
+
+    body = Body((1,), (), (0,), (Op(Prim.not_(), (7,), (0,)),))
+    with pytest.raises(ValueError, match="not a wire"):
+        validate(Program((body,), 0))
+
+
+def test_validate_rejects_a_call_result_of_the_wrong_width():
+    from pylea.ir.body import Body, Op
+    from pylea.ir.program import Program, validate
+
+    callee = _two_bodies()
+    caller = Body((2,), (), (0,), (Op(0, (), (0,)),))
+    with pytest.raises(ValueError, match="width"):
+        validate(Program((callee, caller), 1))
+
+
+def test_validate_rejects_a_body_that_calls_itself():
+    from pylea.ir.body import Body, Op
+    from pylea.ir.program import Program, validate
+
+    alone = Body((1,), (), (0,), (Op(0, (), (0,)),))
+    with pytest.raises(ValueError, match="cannot recurse"):
+        validate(Program((alone,), 0))
+    first = Body((1,), (), (0,), (Op(1, (), (0,)),))
+    second = Body((1,), (), (0,), (Op(0, (), (0,)),))
+    with pytest.raises(ValueError, match="cannot recurse"):
+        validate(Program((first, second), 0))
+
+
+def test_validate_rejects_a_read_before_the_op_producing_it():
+    from pylea.ir.body import Body, Op
+    from pylea.ir.program import Program, validate
+
+    body = Body((1, 1), (), (1,), (Op(Prim.not_(), (0,), (1,)),
+                                   Op(Prim.flip(0.5), (), (0,))))
+    with pytest.raises(ValueError, match="before any op produces it"):
+        validate(Program((body,), 0))
+
+
+def test_a_call_to_an_unknown_body_is_an_arity_error():
+    from pylea.ir.body import ArityError
+
+    with pytest.raises(ArityError, match="does not exist"):
+        BodyBuilder().emit(5, ())
+
+
+def test_a_matrix_with_a_nan_or_infinite_entry_is_rejected():
+    for bad in ([[float("nan")], [1.0]], [[float("inf")], [0.0]]):
+        with pytest.raises(ValueError, match="finite"):
+            Prim.from_matrix(bad)
+
+
+def test_building_a_primitive_leaves_the_callers_array_writeable():
+    import numpy as np
+
+    mine = np.array([[0.25], [0.75]])
+    Prim.from_matrix(mine)
+    assert mine.flags.writeable
+    mine[0, 0] = 0.5

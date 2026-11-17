@@ -134,3 +134,43 @@ def test_excluding_a_gate_gives_the_propagation_that_left_it_out_from_the_start(
     whole = Propagation(circuit, x, value, set(excluded), bit)
     whole.advance(len(body.ops))
     assert (propagation.known, propagation.needs) == (whole.known, whole.needs)
+
+
+def _long_dead_chain():
+    """A body whose only output is ``AND(chain, 0)``, the chain being more ORs over coin
+    flips than the recursion limit allows nested calls."""
+    import sys
+
+    b = BodyBuilder()
+    (acc,) = b.emit(Prim.flip(0.5), ())
+    for _ in range(sys.getrecursionlimit() + 200):
+        (coin,) = b.emit(Prim.flip(0.5), ())
+        (acc,) = b.emit(Prim.or_(), (acc, coin))
+    (zero,) = b.emit(Prim.const(0, 1), ())
+    (out,) = b.emit(Prim.and_(), (acc, zero))
+    return b.finish((), (out,)), acc
+
+
+def test_a_dead_chain_longer_than_the_recursion_limit_is_deleted_in_one_sweep():
+    from pylea.simplify.boolean import bool_rules
+
+    body, _chain = _long_dead_chain()
+    out = bool_rules(prog(body))
+    root = out.bodies[out.root]
+    assert [op.callee for op in root.ops] == [Prim.const(0, 1)]
+
+
+def test_deleting_an_absorbed_op_deletes_a_long_dead_chain_below_it():
+    body, chain = _long_dead_chain()
+    s = Sweep(body)
+    last = body.ops[-1]
+    for op in body.ops:
+        args = s.begin(op)
+        if op is last:
+            s.delete(args[0])
+            s.replace(op, Prim.const(0, 1))
+        else:
+            s.keep(op, args)
+    out = s.finish()
+    # The constant the deleted op read is unread too, and goes with the chain.
+    assert [op.callee for op in out.ops] == [Prim.const(0, 1)]

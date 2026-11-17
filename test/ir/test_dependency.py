@@ -2,9 +2,11 @@
 
 The relation is checked against the one full inlining gives, which is the definition it
 abstracts: with every call spliced in, a dependency is a path through wires that are not
-themselves part of the interface.  The rest of the file pins the cases that definition is
-easy to get wrong on: a route through a third interface wire, a call whose results depend
-on one another, and a wire that is both an input and an output.
+themselves part of the interface, and an interface position whose wire splicing merged
+with an earlier position's is a copy of that position.  The rest of the file pins the cases
+that definition is easy to get wrong on: a route through a third interface wire, a call
+whose results depend on one another, a wire that is both an input and an output, and a
+value handed back through definitions returning their arguments.
 """
 import numpy as np
 import pytest
@@ -25,21 +27,39 @@ MODELS = [simple.empty_dpp, simple.identity_dpp, simple.unused_input_dpp,
           sprinkler.sprinkler_network, sprinkler.rain_given_wet_or_damp_grass]
 
 
-def by_inlining(prog):
-    """The same relation, read off the fully spliced body with no summary of any call."""
+def by_splicing(prog):
+    """The relation by interface position, read off the fully spliced body with no summary
+    of any call.
+
+    Splicing merges a call's result with the argument or result whose value it carries, so
+    two interface positions of the program can name one wire of the spliced body; the later
+    of them is a copy of the first.  A key for each position whose wire the program does
+    not name at an earlier position.
+    """
     body = inline_all(prog, prog.root, lambda _: True)
     assert all(isinstance(op.callee, Prim) for op in body.ops)
 
-    interface = body.inputs + body.outputs
+    flat = body.inputs + body.outputs
+    first: dict[int, int] = {}
+    for k, w in enumerate(flat):
+        first.setdefault(w, k)
     into = [set() for _ in body.bits]
     for op in body.ops:
         joint = set()
         for w in op.args:
-            joint |= {w} if w in interface else into[w]
+            joint |= {first[w]} if w in first else into[w]
         for w in op.outs:
             into[w] = set(joint)
-    return ({w: frozenset() if w in body.inputs else frozenset(into[w])
-             for w in dict.fromkeys(interface)}, body)
+
+    wires = prog.main.inputs + prog.main.outputs
+    relation = {}
+    for k, w in enumerate(wires):
+        if wires.index(w) != k:
+            continue
+        f = first[flat[k]]
+        relation[k] = (frozenset() if k < len(prog.main.inputs) else frozenset({f}) if f < k
+                       else frozenset(into[flat[k]]))
+    return relation
 
 
 def by_position(deps, wires):
@@ -50,40 +70,22 @@ def by_position(deps, wires):
     return {at[w]: frozenset(at[v] for v in d) for w, d in deps.items()}
 
 
-def merges_an_interface_wire(prog, flat):
-    """Whether splicing identified two interface wires, which renames what is compared.
-
-    A callee returning one of its arguments merges the call's argument and result, so the
-    spliced body has one wire where the program has two.
-    """
-    return (len(set(flat.inputs + flat.outputs))
-            != len(set(prog.main.inputs + prog.main.outputs)))
+def agrees_with_splicing(prog) -> bool:
+    return (by_position(direct_dependencies(prog), prog.main.inputs + prog.main.outputs)
+            == by_splicing(prog))
 
 
 @pytest.mark.parametrize("model", MODELS, ids=lambda m: m.name())
 def test_the_summaries_agree_with_splicing_every_call_in(model):
-    prog = model.program()
-    spliced, flat = by_inlining(prog)
-    if merges_an_interface_wire(prog, flat):
-        pytest.skip("splicing merged two interface wires, so the two do not compare")
-    assert (by_position(direct_dependencies(prog), prog.main.inputs + prog.main.outputs)
-            == by_position(spliced, flat.inputs + flat.outputs))
+    assert agrees_with_splicing(model.program())
 
 
 def test_the_summaries_agree_with_splicing_on_random_programs():
-    compared = 0
     for seed in range(200):
         rng = np.random.default_rng(seed)
         prog = random_program(rng, n_bodies=int(rng.integers(1, 4)),
                               n_ops=int(rng.integers(1, 7)))
-        spliced, flat = by_inlining(prog)
-        if merges_an_interface_wire(prog, flat):
-            continue
-        compared += 1
-        assert (by_position(direct_dependencies(prog),
-                            prog.main.inputs + prog.main.outputs)
-                == by_position(spliced, flat.inputs + flat.outputs)), f"seed {seed}"
-    assert compared > 150, "too few programs were comparable for this to say much"
+        assert agrees_with_splicing(prog), f"seed {seed}"
 
 
 def _reordered(prog):
@@ -113,14 +115,9 @@ def test_the_summaries_agree_with_splicing_when_a_caller_reorders_the_results():
         if len(prog.main.outputs) < 2:
             continue
         prog = _reordered(prog)
-        spliced, flat = by_inlining(prog)
-        if merges_an_interface_wire(prog, flat):
-            continue
         compared += 1
-        assert (by_position(direct_dependencies(prog),
-                            prog.main.inputs + prog.main.outputs)
-                == by_position(spliced, flat.inputs + flat.outputs)), f"seed {seed}"
-    assert compared > 50, "too few programs were comparable for this to say much"
+        assert agrees_with_splicing(prog), f"seed {seed}"
+    assert compared > 50, "too few programs had two results for this to say much"
 
 
 def _relayed(prog):
@@ -152,14 +149,9 @@ def test_the_summaries_agree_with_splicing_when_results_pass_through_a_relay():
         if len(prog.main.outputs) < 2 or prog.main.bits[prog.main.outputs[0]] != 1:
             continue
         prog = _relayed(prog)
-        spliced, flat = by_inlining(prog)
-        if merges_an_interface_wire(prog, flat):
-            continue
         compared += 1
-        assert (by_position(direct_dependencies(prog),
-                            prog.main.inputs + prog.main.outputs)
-                == by_position(spliced, flat.inputs + flat.outputs)), f"seed {seed}"
-    assert compared > 50, "too few programs were comparable for this to say much"
+        assert agrees_with_splicing(prog), f"seed {seed}"
+    assert compared > 50, "too few programs had two results for this to say much"
 
 
 def test_a_result_computed_from_a_later_result_of_the_same_call_keeps_its_dependency():
@@ -271,3 +263,102 @@ def test_a_body_other_than_the_root_can_be_asked():
     body = prog.bodies[other]
     deps = direct_dependencies(prog, other)
     assert set(deps) == set(body.inputs) | set(body.outputs)
+
+
+@DPP
+def _both(x: Bool) -> tuple[Bool, Bool]:
+    return x, x
+
+
+def test_an_output_built_through_argument_returning_definitions_depends_on_nothing_it_makes():
+    """The value is created by the coin flip; the calls only hand it back."""
+    @DPP
+    def twice() -> Bool:
+        _, b = _both(flip(0.5))
+        _, d = _both(b)
+        return d
+
+    body = twice.program().main
+    assert direct_dependencies(twice.program()) == {body.outputs[0]: frozenset()}
+
+
+def test_a_value_returned_at_two_positions_makes_the_second_depend_on_the_first():
+    @DPP
+    def pair(x: Bool) -> tuple[Bool, Bool]:
+        return x, _both(x)[0]
+
+    @DPP
+    def top() -> tuple[Bool, Bool]:
+        return pair(flip(0.5))
+
+    first, second = top.program().main.outputs
+    assert direct_dependencies(top.program()) == {first: frozenset(),
+                                                   second: frozenset({first})}
+
+
+def test_nested_argument_returning_definitions_do_not_raise():
+    @DPP
+    def first(x: Bool, y: Bool) -> Bool:
+        return x
+
+    @DPP
+    def mid(x: Bool) -> tuple[Bool, Bool]:
+        y = first(x, x)
+        return x, first(y, y)
+
+    @DPP
+    def inner() -> Bool:
+        _, b = mid(flip(0.5))
+        return first(b, flip(0.5))
+
+    @DPP
+    def outer() -> Bool:
+        return inner()
+
+    body = outer.program().main
+    assert direct_dependencies(outer.program()) == {body.outputs[0]: frozenset()}
+    assert len(outer.dependency_graph().sketch.nodes) == 1
+
+
+def _handing_back(rng) -> Program:
+    """A small call graph whose bodies mostly return their arguments or what a call to an
+    earlier body returned, which is where one value reaches several wires."""
+    bodies: list = []
+    for _ in range(int(rng.integers(1, 4))):
+        b = BodyBuilder(bodies)
+        inputs = [b.fresh() for _ in range(int(rng.integers(0, 3)))]
+        pool = list(inputs)
+        for _ in range(int(rng.integers(0, 3))):
+            if bodies and pool and rng.random() < 0.7:
+                c = int(rng.integers(len(bodies)))
+                pool += b.emit(c, [pool[int(rng.integers(len(pool)))]
+                                   for _ in bodies[c].inputs])
+            else:
+                pool += b.emit(Prim.flip(0.5), ())
+        outputs = ([pool[int(rng.integers(len(pool)))]
+                    for _ in range(int(rng.integers(1, 3)))] if pool else [])
+        bodies.append(b.finish(inputs, outputs))
+    return Program(tuple(bodies), len(bodies) - 1)
+
+
+def _is_acyclic(deps: dict[int, frozenset[int]]) -> bool:
+    waiting = {w: set(d) for w, d in deps.items()}
+    settled = True
+    while settled:
+        settled = [w for w, d in waiting.items() if not d]
+        for w in settled:
+            del waiting[w]
+        for d in waiting.values():
+            d.difference_update(settled)
+    return not waiting
+
+
+def test_the_relation_is_acyclic_on_random_programs():
+    for seed in range(2000):
+        rng = np.random.default_rng(seed)
+        prog = (_handing_back(rng) if seed % 2 else
+                random_program(rng, n_bodies=int(rng.integers(1, 4)),
+                               n_ops=int(rng.integers(1, 7))))
+        deps = direct_dependencies(prog)
+        assert _is_acyclic(deps), f"seed {seed}"
+        assert agrees_with_splicing(prog), f"seed {seed}"

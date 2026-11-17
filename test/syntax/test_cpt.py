@@ -101,8 +101,8 @@ class TestEnumCptBasic:
         assert _allclose(M[:3, 0], [0.5, 0.3, 0.2])
         assert _allclose(M[:3, 1], [0.1, 0.4, 0.5])
 
-    def test_a_parent_with_spare_patterns_repeats_its_nearest_row(self):
-        """Tri parent (3 states, 2 bits) has one unreachable parent config per output bit."""
+    def test_a_parent_pattern_encoding_no_value_takes_the_row_of_the_first_value(self):
+        """Tri parent (3 states, 2 bits) has one pattern, 3, that encodes no value."""
         cdpp = Bin.cpt((Tri,), {
             ("a",): [0.8, 0.2],
             ("b",): [0.4, 0.6],
@@ -115,6 +115,7 @@ class TestEnumCptBasic:
         assert _allclose(M[:, 0], [0.8, 0.2])
         assert _allclose(M[:, 1], [0.4, 0.6])
         assert _allclose(M[:, 2], [0.1, 0.9])
+        assert _allclose(M[:, 3], M[:, 0])
 
     def test_a_row_given_as_a_list_is_indexed_by_element_position(self):
         """Rows as positional lists (BIF parser format)."""
@@ -178,7 +179,7 @@ class TestEnumCptMultiParent:
         # (False, "a") → idx 0
         # (False, "b") → idx 1
         # (False, "c") → idx 2
-        # (False, UR)  → idx 3 (unreachable, should equal (False,"a") by filler)
+        # (False, UR)  → idx 3 (encodes no value, takes the row of (False, "a"))
         # (True, "a")  → idx 4
         # etc.
         assert _allclose(M[:, 0], [0.1, 0.9])
@@ -187,6 +188,7 @@ class TestEnumCptMultiParent:
         assert _allclose(M[:, 4], [0.6, 0.4])
         assert _allclose(M[:, 5], [0.7, 0.3])
         assert _allclose(M[:, 6], [0.8, 0.2])
+        assert _allclose(M[:, 3], M[:, 0]) and _allclose(M[:, 7], M[:, 4])
 
 
 # --- the two encodings compared over the sprinkler network ---
@@ -320,50 +322,120 @@ class TestSprinklerNetworkEquivalence:
             f"Joint distribution mismatch:\nMatch:\n{M_match}\nCPT:\n{M_cpt}"
 
 
-# --- the tables the .bif converter generates ---
+# --- arguments and rows that are refused ---
 
-class TestBifCodegen:
-    """Verify bif_to_python now emits cpt(...) instead of nested match."""
+class TestEnumCptChecks:
+    """Mistakes in the arguments raise rather than change the table."""
 
-    def test_generated_code_builds_its_tables_with_cpt(self):
-        from pylea.utility.bif_to_dpp import bif_to_python
-        bif = """\
-network test { }
-variable X { type discrete [ 2 ] { a, b }; }
-variable Y { type discrete [ 2 ] { p, q }; }
-probability ( X ) { table 0.4, 0.6; }
-probability ( Y | X ) {
-  (a) 0.3, 0.7;
-  (b) 0.8, 0.2;
-}
-"""
-        code = bif_to_python(bif)
-        assert "Y.cpt(" in code, "Expected cpt() in generated code"
-        assert "@DPP" not in code.split("def test")[0] or ".cpt(" in code, \
-            "Expected no @DPP for conditional variable"
+    def test_a_cpt_row_naming_a_value_that_is_not_an_element_is_refused(self):
+        with pytest.raises(ValueError, match="'d' is not an element of Tri"):
+            Tri.cpt([Bin], {(False,): {"a": 0.5, "d": 0.5}, (True,): [1, 0, 0]})
 
-    def test_generated_code_imports_and_evaluates(self):
-        """Generated code can be exec'd and the network DPP can be compiled."""
-        from pylea.utility.bif_to_dpp import bif_to_python
-        bif = """\
-network tiny { }
-variable A { type discrete [ 2 ] { lo, hi }; }
-variable B { type discrete [ 2 ] { x, y }; }
-probability ( A ) { table 0.5, 0.5; }
-probability ( B | A ) {
-  (lo) 0.2, 0.8;
-  (hi) 0.7, 0.3;
-}
-"""
-        code = bif_to_python(bif)
-        ns: dict = {}
-        exec(code, ns)
-        net = ns["tiny"]
-        # Should be a DPP with B.cpt() already built
-        assert hasattr(net, "output_types")
-        # Compile it (should not trigger a merge loop for B)
+    @pytest.mark.parametrize("row", [[0.5, 0.2, 0.2, 0.1], [1.0]])
+    def test_a_list_row_of_the_wrong_length_is_refused(self, row):
+        with pytest.raises(ValueError, match="needs 3 entries"):
+            Tri.cpt([Bin], {(False,): row, (True,): [1, 0, 0]})
+
+    def test_a_row_given_as_a_tuple_or_an_array_is_read_in_element_order(self):
+        cdpp = Tri.cpt([Bin], {(False,): (0.5, 0.5, 0.0), (True,): np.array([0.0, 0.2, 0.8])})
+        M = _eval(cdpp)
+        assert _allclose(M[:3, 0], [0.5, 0.5, 0.0])
+        assert _allclose(M[:3, 1], [0.0, 0.2, 0.8])
+
+    def test_a_lone_parent_type_is_refused_with_a_list_suggested(self):
+        with pytest.raises(TypeError, match=r"such as \[Tri\]"):
+            Bin.cpt(Tri, {("a",): [1, 0], ("b",): [1, 0], ("c",): [1, 0]})
+
+    def test_a_row_for_a_parent_value_that_does_not_exist_is_refused(self):
+        rows = {("a",): [1, 0], ("b",): [1, 0], ("c",): [1, 0], ("hail",): [0, 1]}
+        with pytest.raises(ValueError, match=r"\('hail',\)"):
+            Bin.cpt([Tri], rows)
+
+    def test_a_missing_row_is_refused(self):
+        with pytest.raises(ValueError, match=r"no row for \('c',\)"):
+            Bin.cpt([Tri], {("a",): [1, 0], ("b",): [1, 0]})
+
+    def test_rows_keyed_by_bare_values_are_refused_with_one_element_tuples_suggested(self):
+        with pytest.raises(ValueError, match=r"such as \('a',\)"):
+            Bin.cpt([Tri], {"a": [1, 0], "b": [1, 0], "c": [1, 0]})
+
+    def test_a_table_wider_than_the_dense_bound_is_refused_before_it_is_built(self):
+        import itertools
         import time
-        t0 = time.perf_counter()
-        cdpp = net.compiled()
-        t1 = time.perf_counter()
-        assert t1 - t0 < 30.0, f"Compilation took too long: {t1-t0:.1f}s"
+        rows = {key: [0.5, 0.5] for key in itertools.product(Tri.elements, repeat=10)}
+        start = time.perf_counter()
+        with pytest.raises(ValueError, match=r"2\*\*21 entries"):
+            Bin.cpt([Tri] * 10, rows)
+        assert time.perf_counter() - start < 0.5
+
+    def test_an_abstract_child_raises_not_implemented_error(self):
+        class Abstract(Enum):
+            pass
+
+        with pytest.raises(NotImplementedError, match="declares no elements"):
+            Abstract.cpt([Bin], {(False,): [1.0], (True,): [1.0]})
+
+
+class TestEnumCptParentTypes:
+    """A parent of any variable type, keyed by its values, agrees with a `match`."""
+
+    def _agree(self, cpt, reference: DPP) -> None:
+        @DPP
+        def through_cpt(x: cpt.input_types()[0]) -> Tri:   # type: ignore[valid-type]
+            return cpt(x)
+
+        # Compared on the parent patterns that encode a value; on the others, the table
+        # takes the row of the parent's first value, which a `match` need not.
+        valid = sorted(cpt.input_types()[0].encoding().decoded())
+        assert _allclose(_eval_dpp(through_cpt)[:, valid], _eval_dpp(reference)[:, valid])
+
+    def test_a_bool_parent_is_keyed_by_true_and_false(self):
+        from pylea import Bool
+
+        cpt = Tri.cpt([Bool], {(False,): [0.2, 0.3, 0.5], (True,): [0.6, 0.4, 0.0]})
+
+        @DPP
+        def by_match(x: Bool) -> Tri:
+            return x.match({False: Tri.random([0.2, 0.3, 0.5]),
+                            True: Tri.random([0.6, 0.4, 0.0])})
+
+        self._agree(cpt, by_match)
+
+    def test_a_uint_parent_is_keyed_by_its_integers(self):
+        from pylea import UInt
+
+        class Two(UInt):
+            width = 2
+
+        rows = {(v,): [v + 1, 1, 3 - v] for v in range(4)}
+        cpt = Tri.cpt([Two], rows)
+
+        @DPP
+        def by_match(x: Two) -> Tri:
+            return (x < 2).match({
+                True: (x < 1).match({True: Tri.random(rows[(0,)]),
+                                     False: Tri.random(rows[(1,)])}),
+                False: (x < 3).match({True: Tri.random(rows[(2,)]),
+                                      False: Tri.random(rows[(3,)])})})
+
+        self._agree(cpt, by_match)
+
+    def test_a_tuple_parent_is_keyed_by_plain_tuples(self):
+        from pylea import Tuple
+
+        class Pair(Tuple):
+            types = (Bin, Tri)
+
+        # One parent, whose values are tuples: each key is a tuple of one tuple.
+        rows = {((b, t),): [1 + i, 2, 3] for i, (b, t) in
+                enumerate((b, t) for b in Bin.elements for t in Tri.elements)}
+        cpt = Tri.cpt([Pair], rows)
+
+        @DPP
+        def by_match(p: Pair) -> Tri:
+            b, t = p.components()
+            return b.match({b_value: t.match({t_value: Tri.random(rows[((b_value, t_value),)])
+                                              for t_value in Tri.elements})
+                            for b_value in Bin.elements})
+
+        self._agree(cpt, by_match)

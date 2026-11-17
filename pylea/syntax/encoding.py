@@ -1,30 +1,28 @@
 """Bit encodings.
 
-A `BitEncoded` subclass gives each value of its `base_type` a pattern of `nbits` bits and
-reads that pattern back.  Every `pylea.syntax.variable.Variable` subclass declares one, and
-that is what connects the DSL to the wires beneath it.
+A `BitEncoded` subclass gives each value of a type a pattern of `nbits` bits and reads that
+pattern back.  Every `pylea.syntax.variable.Variable` subclass declares one, and that is
+what connects the variable types to the bits beneath them.
 
-Not every one of the ``2**nbits()`` patterns need be valid, and neither need every value of
-the base type.  `n_values` says how many patterns are, and a subclass must make `from_bits`
-a bijection from the first `n_values` patterns, read as integers, onto the valid values,
-with `to_bits` its inverse.  `decoded` returns that map from pattern to value.
+Not every one of the ``2**nbits()`` patterns need encode a value.  The contract every
+subclass keeps: `from_bits` raises `ValueError` for a pattern that encodes no value and is a
+bijection from the remaining patterns onto the values; `to_bits` is its inverse; `n_values`
+counts those patterns, and `decoded` maps each of them, read as an integer, to its value.
+Constructing an instance from something that is not a value raises `ValueError`, or
+`TypeError` where it is not even of the right kind.
 """
 from abc import abstractmethod, ABC
 from typing import Any, ClassVar, Self
 
 
 class BitEncoded(ABC):
-    """A fixed-width bit representation of the values of some Python type.
+    """A fixed-width bit representation of the values of a variable type.
 
-    A subclass gives each value of its `base_type`, such as a `bool` or a string element,
-    a bit pattern of length `nbits`, and reads that pattern back.  This is the bridge
-    between the DSL and the bit level: every `pylea.syntax.variable.Variable` subclass
-    declares its encoding, and `nbits`, `from_bits` and `to_bits` translate across.
-
-    Not every one of the ``2**nbits()`` patterns need be valid, and neither need every
-    value of the base type.  `n_values` reports how many patterns are valid, and a
-    subclass must make `from_bits` a bijection from the first `n_values` patterns, read as
-    integers, onto the valid values, with `to_bits` its inverse.
+    A subclass gives each value, such as a `bool`, an element of an `Enum` or a tuple, a
+    bit pattern of length `nbits`, and reads that pattern back.  Every
+    `pylea.syntax.variable.Variable` subclass declares its encoding, and `from_bits` and
+    `to_bits` convert between its values and their bits.  The module docstring states the
+    contract a subclass keeps.
     """
 
     _decoded: ClassVar[dict[int, object] | None] = None
@@ -41,10 +39,10 @@ class BitEncoded(ABC):
 
     @classmethod
     def n_values(cls) -> int:
-        """How many bit patterns this encoding treats as valid.
+        """How many bit patterns encode a value.
 
         ``2**nbits()`` unless a subclass overrides it, which one must where not every
-        pattern is valid.  See the class docstring for the bijection to maintain.
+        pattern encodes a value.
 
             >>> from pylea import Enum
             >>> class Colour(Enum):

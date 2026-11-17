@@ -1,9 +1,12 @@
 """Build the HTML API reference into ``docs/_build``.
 
-Every module under ``pylea/`` is named explicitly rather than discovered by recursion:
-several packages re-export a function under its defining module's name via ``__all__``
-(``pylea.simplify.lift`` the module, ``lift`` the function), and pdoc's automatic recursion
-follows ``__all__``, silently dropping the shadowed module's page.
+Every public module under ``pylea/`` is listed explicitly rather than left to pdoc's
+recursion alone: several packages re-export a function under its defining module's name
+via ``__all__`` (``pylea.simplify.lift`` the module, ``lift`` the function), and pdoc's
+recursion follows ``__all__``, dropping the shadowed module's page.  pdoc is given only
+the listed names that the recursion from the names before them does not reach, since a
+module reached twice is reported as a duplicate, and an exclusion pattern then removes
+the private modules, such as subprocess workers, that the recursion reaches.
 
 Doctests are highlighted as Python sessions.  Docstrings write them as indented blocks,
 which doctest reads and Markdown renders without highlighting, so `fenced_doctests` turns
@@ -78,7 +81,8 @@ def highlight_doctests() -> None:
 
 
 def modules() -> list[str]:
-    """The dotted name of every module in the package, packages before their contents."""
+    """The dotted name of every public module in the package, packages before their
+    contents."""
     names = []
     for path in sorted((ROOT / "pylea").rglob("*.py")):
         parts = path.relative_to(ROOT).with_suffix("").parts
@@ -88,6 +92,21 @@ def modules() -> list[str]:
             continue                    # private modules, such as subprocess workers
         names.append(".".join(parts))
     return names
+
+
+def specifications() -> list[str]:
+    """The module specifications given to pdoc: the names of `modules` that pdoc's
+    recursion from the earlier ones does not reach, then a pattern excluding every module
+    whose name has a part starting with an underscore."""
+    from pdoc.extract import walk_specs
+
+    specs: list[str] = []
+    reached: set[str] = set()
+    for name in modules():
+        if name not in reached:
+            specs.append(name)
+            reached.update(walk_specs([name]))
+    return [*specs, r"!.*\._"]
 
 
 def illustrate() -> None:
@@ -155,7 +174,7 @@ def notebooks() -> None:
 if __name__ == "__main__":
     pdoc.render.configure(docformat="markdown", footer_text="Pylea")
     highlight_doctests()
-    pdoc.pdoc(*modules(), output_directory=OUT)
+    pdoc.pdoc(*specifications(), output_directory=OUT)
     illustrate()
     notebooks()
     print(f"wrote {sum(1 for _ in OUT.rglob('*.html'))} pages to {OUT}")

@@ -3,7 +3,7 @@
 `inline` splices a body into its caller where the body has exactly one call site, counted
 over the whole DPP, and drops the body.  The call and the definition go, and the
 definition's ops take the call's place, so the DPP loses two symbols per interface
-position of the body.
+position of the body and two more, one for the call and one for the definition.
 
 A body with several sites is left alone whatever its size: splicing it everywhere would
 copy it, and a chain of definitions each calling the one below it twice would unfold to a
@@ -12,13 +12,16 @@ op can take more symbols than the call it replaces, as where the op reads a wire
 has results the body does not return, so splicing it at every site does not lower `size`
 in general.
 
+The splicing itself is `pylea.ir.inline.inline_calls`, which builds each body that stays
+once, so the rule takes time linear in the size of the DPP.
+
 Splicing a callee that is too wide to hold as one matrix is a separate matter, done out of
 necessity rather than profit; `pylea.ir.inline.flatten_wide_calls` is that one.
 """
 from __future__ import annotations
 
 from pylea.ir.body import prune_wires
-from pylea.ir.inline import inline_all
+from pylea.ir.inline import inline_calls
 from pylea.ir.program import Program, intern, reachable, use_counts
 
 
@@ -41,8 +44,7 @@ def inline(prog: Program) -> Program:
     if not chosen:
         return prog
 
-    bodies = list(prog.bodies)
-    for i in reachable(prog):           # callees first: what is spliced in is already flat
-        spliced = inline_all(Program(tuple(bodies), prog.root), i, chosen.__contains__)
-        bodies[i] = prune_wires(spliced)
-    return intern(Program(tuple(bodies), prog.root))
+    spliced = inline_calls(prog, chosen.__contains__).bodies
+    return intern(Program(
+        tuple(b if b is prog.bodies[i] else prune_wires(b) for i, b in enumerate(spliced)),
+        prog.root))

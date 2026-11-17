@@ -35,7 +35,7 @@ from pylea.ir.prim import Prim, Tag
 from pylea.ir.program import Program, deterministic
 
 from pylea.simplify.common import (
-    Sweep, admitted_pattern, composed, each_body, evaluated, gate_tag,
+    Sweep, admitted_pattern, composed, each_body, evaluated, gate_tag, product_in_range,
 )
 
 
@@ -124,6 +124,9 @@ def _split(s: Sweep, op: Op, args: tuple[int, ...]) -> bool:
         tag = gate_tag(p)
         if tag is Tag.OR:
             break
+        if not (isinstance(p.callee, Prim)
+                and product_in_range([p.callee, callee], len(p.outs))):
+            break                       # the product would leave the float64 range
         absorbed.append(p)
         if tag is Tag.AND and callee.tag is Tag.OBSERVE:
             split = True
@@ -153,7 +156,7 @@ def _sole_producer(s: Sweep, args: tuple[int, ...], held: Counter) -> Op | None:
     if len(producers) != 1:
         return None
     (p,) = producers
-    if p is None or isinstance(p.callee, int):
+    if p is None or not isinstance(p.callee, Prim):
         return None
     if set(p.outs) != set(args) or any(s.reads(w) != held[w] for w in p.outs):
         return None

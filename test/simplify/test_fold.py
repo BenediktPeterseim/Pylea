@@ -1,4 +1,5 @@
 """Constant folding: sources into readers, foldable blocks, and bottom CSE."""
+import numpy as np
 import pytest
 
 from pylea.ir.body import BodyBuilder
@@ -106,6 +107,50 @@ def test_an_observed_flip_becomes_a_scalar_weight():
     out = _check(const_fold, intern(prog(b.finish((), (y,)))))
     assert any(isinstance(op.callee, Prim) and op.callee.in_bits == 0 and op.callee.out_bits == 0
                for op in out.main.ops)
+
+
+
+def _chain_of_tables(n: int, seed: int = 0) -> Program:
+    """A coin flip read by a chain of `n` random stochastic tables of one input each."""
+    rng = np.random.default_rng(seed)
+    b = BodyBuilder()
+    (w,) = b.emit(Prim.flip(0.3), ())
+    for _ in range(n):
+        column = rng.uniform(0.05, 0.95, size=2)
+        (w,) = b.emit(Prim.from_matrix([column, 1.0 - column]), (w,))
+    return intern(prog(b.finish((), (w,))))
+
+
+def test_a_chain_of_tables_from_a_source_folds_in_one_application():
+    p = _chain_of_tables(50)
+    out = const_fold(p)
+    validate(out)
+    assert op_count(out) == 1
+    # The chain is too long for `semantics`, which enumerates every wire, so its matrix is
+    # the product of the tables, taken in an order of its own and agreeing to round-off.
+    want = np.ones((1, 1))
+    for op in p.main.ops:
+        assert isinstance(op.callee, Prim)
+        want = op.callee.matrix @ want
+    (folded,) = (op.callee for op in out.main.ops)
+    assert isinstance(folded, Prim) and np.allclose(folded.matrix, want, rtol=1e-12, atol=1e-15)
+
+
+def test_a_chain_of_tables_takes_a_bounded_number_of_rounds():
+    from pylea.simplify import RULES, simplify
+
+    applied = {rule.__name__: 0 for rule in RULES}
+
+    def counted(rule):
+        def apply(p: Program) -> Program:
+            applied[rule.__name__] += 1
+            return rule(p)
+        apply.__name__ = rule.__name__
+        return apply
+
+    p = _chain_of_tables(200)
+    out = simplify(p, rules=tuple(counted(rule) for rule in RULES))
+    assert op_count(out) == 1 and applied["const_fold"] <= 2
 
 
 # ---------------------------------------------------------------------- blocks
@@ -294,3 +339,36 @@ def test_a_program_without_sources_is_untouched(rule):
     (a,) = b.emit(Prim.and_(), (i, j))
     p = prog(b.finish((i, j), (a,)))
     assert rule(p) == p
+
+
+def _tables_of(scale: float):
+    from pylea import DPP, Bool, LikelihoodTable
+
+    source = LikelihoodTable((), (Bool,), np.array([[scale], [3 * scale]]))
+    table = LikelihoodTable((Bool,), (Bool,), np.array([[scale, 0.0], [0.0, scale]]))
+
+    @DPP
+    def d() -> Bool:
+        return table(source())
+    return d
+
+
+@pytest.mark.parametrize("scale", [1e-200, 1e200])
+def test_two_tables_whose_product_leaves_the_float_range_are_not_composed(scale):
+    from pylea.simplify import simplify as simplify_program
+
+    d = _tables_of(scale)
+    traced = d.program()
+    simplified = simplify_program(traced)
+    assert len(simplified.bodies[simplified.root].ops) == 2
+    plain = d.compiled(simplify=False).matrix()
+    always = d.compiled(simplify="always").matrix()
+    np.testing.assert_allclose(always[0], plain[0], rtol=1e-12)
+    assert always[1] == pytest.approx(plain[1], rel=1e-12)
+
+
+def test_tables_in_the_ordinary_range_are_still_composed():
+    from pylea.simplify import simplify as simplify_program
+
+    simplified = simplify_program(_tables_of(0.5).program())
+    assert len(simplified.bodies[simplified.root].ops) == 1

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The publish workflow runs these jobs before it builds a release.
+  workflow_call:
 
 jobs:
   # Every Python version pyproject.toml admits that has been released, on Linux and Windows.
@@ -49,3 +51,25 @@ jobs:
       # A failed import here fails the job; inside pytest it would only skip the tests.
       - run: python -c "import torch"
       - run: pytest test/eval/test_backend.py pylea/eval/backend.py
+
+  # The lowest versions of its dependencies that pyproject.toml admits, so that its lower
+  # bounds are versions the tests pass with.  Only Pylea's own dependencies are held at
+  # their lowest; the test tools are installed afterwards at their latest versions.
+  lowest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv
+      - run: uv pip install --system --resolution lowest-direct -e .
+      - run: uv pip install --system pytest matplotlib ipython
+      - name: Show the versions under test
+        run: |
+          python - <<'EOF'
+          from importlib.metadata import version
+          for name in ("numpy", "scipy", "cotengra", "cotengrust"):
+              print(name, version(name))
+          EOF
+      - run: pytest

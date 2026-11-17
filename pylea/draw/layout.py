@@ -5,26 +5,33 @@ inputs are on the lowest rank and the outputs on the highest.  The result is mea
 units the glyphs are, with the origin at the bottom left.  A sketch marked `downward` is
 turned over at the end, so that it reads from the top down instead.
 
-The steps are the usual layered ones, less the two a straight-line definition does not need.
-Ranking is a longest path, exact here because a `pylea.ir.body.Body` is already
-topologically sorted and acyclic.  A wire crossing more than one rank is broken into one
-dummy node per rank it passes.  Ranks are then ordered by repeated median sweeps, keeping
-the ordering that crosses least.  Coordinates come from `pylea.draw.coordinates`, which
-places the dummies carrying one wire as a single block so that the wire is straight.
+The steps are the usual layered ones [1]: ranking, ordering within each rank, and
+coordinates.
+
+**The ranking is the lowest one of least total span.**  Every wire rises by at least one
+rank, the input markers are on rank 0, and the output markers share one rank above every
+other node.  The span of a wire is the number of ranks it rises by.  Of the rankings
+meeting these constraints, the ones used have the least total span, and of those the
+lowest: each node takes the least rank any ranking of least span gives it.  The least
+total span is the objective of the ranking step of [1]; the lowest such ranking is unique,
+so the picture does not depend on how the solver breaks ties.  A wire rising by
+more than one rank is broken into one dummy node per rank it passes, so the total span
+sets the number of nodes the later steps work on.  The least total span also places an
+operation reading nothing, such as a coin flip or a constant, just below the operation
+reading it rather than on rank 0.  The ranking is found by two linear programs, solved by
+scipy's HiGHS; where they fail, the ranking is the longest path from rank 0, with the
+output markers on top.
+
+Ranks are then ordered by repeated median sweeps, keeping the ordering that crosses least.
+Coordinates come from `pylea.draw.coordinates`, which places the dummies carrying one wire
+as a single block, so that a wire crossing several ranks is drawn straight and bends only
+where it meets the glyph at either end.
 
 Argument order shows in the drawing because a port's offset within its box enters both the
 ordering and the coordinates.
 
-A wire crossing several ranks is drawn straight, the coordinates placing its dummies as one
-block, so it bends only where it meets the glyph at either end.
-
 A wire of a directed sketch ends in an arrow head, and the ranks of such a picture are set
 apart far enough for the head to stand in the gap rather than fill it.
-
-An operation reading nothing, a coin flip or a constant, goes two ranks below the operation
-that first reads it rather than at the bottom.  Pinning one to the bottom rank stretches
-every wire leaving it and makes the lowest rank as wide as the number of coin flips in the
-definition.
 
     >>> from pylea import DPP, Bool, flip
     >>> from pylea.draw.sketch import sketch_of
@@ -34,21 +41,28 @@ definition.
     >>> p = place(sketch_of(either.program()))
     >>> len(p.routes), p.height > p.width / 4
     (6, True)
+
+[1] E. R. Gansner, E. Koutsofios, S. C. North and K.-P. Vo, "A technique for drawing
+directed graphs", IEEE Transactions on Software Engineering 19(3), 1993.
+https://doi.org/10.1109/32.221135
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from pylea.draw.coordinates import coordinates
 from pylea.draw.glyph import Glyph, GlyphKind, Style, entry_point, glyph_of
 from pylea.draw.sketch import Sketch
 
-# Sweeps of the ordering step, and the node budget that cuts them back.  One sweep costs a
-# pass over every node, so a sketch of tens of thousands of nodes still settles in about a
-# second.
+# Sweeps of the ordering step, and the bound on the nodes all sweeps of one sketch visit
+# together, at least one sweep running however large the sketch.  The bound keeps the
+# ordering of a large sketch under about a second: one node visit takes 1.4 to 2.2
+# microseconds, timed on diagrams of 1,000 to 52,000 nodes with dummies on an Apple M3 Pro.
+# Re-time after changing `_order`.
 _MAX_ORDER_SWEEPS = 8
 _SWEEP_BUDGET = 400_000
-_COORD_SWEEPS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +116,114 @@ def place(sketch: Sketch, style: Style | None = None,
 
 # -- ranking ---------------------------------------------------------------------------
 
+def _linprog(linprog, c, **constraints):
+    """scipy's `linprog` with the dual simplex method of HiGHS, solved again without its
+    presolve where the first solve fails: HiGHS's presolve in scipy 1.13 reports some
+    feasible rankings as infeasible."""
+    result = linprog(c, method="highs-ds", **constraints)
+    if result.status != 0:
+        result = linprog(c, method="highs-ds", options={"presolve": False}, **constraints)
+    return result
+
+
 def _ranks(sketch: Sketch) -> list[int]:
-    """The rank of every node: 0 at the bottom, one above the highest rank feeding it."""
+    """The rank of every node: the lowest ranking of least total span.
+
+    Input markers are on rank 0, output markers on one rank above every other node, and
+    every wire rises by at least one rank.  Where the solver reports no solution, or its
+    solution breaks one of these constraints, the result is `_longest_path_ranks` instead.
+
+    The coin flip below is read only by the last gate, so it is ranked level with the
+    first gate rather than on rank 0:
+
+        >>> from pylea import DPP, Bool, flip
+        >>> from pylea.draw.sketch import sketch_of
+        >>> @DPP
+        ... def late(a: Bool, b: Bool) -> Bool:
+        ...     return (a & b) & flip(0.5)
+        >>> s = sketch_of(late.program())
+        >>> [(n.kind.name, r) for n, r in zip(s.nodes, _ranks(s)) if n.op is not None]
+        [('AND', 2), ('FLIP', 2), ('AND', 4)]
+    """
+    from scipy.optimize import linprog
+    from scipy.sparse import coo_matrix
+
+    n = len(sketch.nodes)
+    src = np.array([e.src for e in sketch.edges], dtype=np.int64)
+    dst = np.array([e.dst for e in sketch.edges], dtype=np.int64)
+    has_succ = np.zeros(n, dtype=bool)
+    has_succ[src] = True
+    boundary = np.array([node.kind is GlyphKind.BOUNDARY for node in sketch.nodes], dtype=bool)
+    outs, ins = boundary & ~has_succ, boundary & has_succ
+
+    # One variable per node, except that the output markers share one: the top rank.
+    var = np.arange(n, dtype=np.int64)
+    n_var = n
+    if outs.any():
+        var[outs] = n
+        n_var = n + 1
+    # Rows of `x[below] - x[above] <= -1`: one per wire, and, where there is a top rank,
+    # one per other node no wire leaves, so that no node reaches the top rank.
+    below, above = var[src], var[dst]
+    if outs.any():
+        sinks = np.flatnonzero(~has_succ & ~outs)
+        below = np.concatenate([below, sinks])
+        above = np.concatenate([above, np.full(len(sinks), n)])
+    if not len(below):
+        return [0] * n
+
+    rows = np.arange(len(below))
+    a_ub = coo_matrix((np.concatenate([np.ones(len(rows)), -np.ones(len(rows))]),
+                       (np.concatenate([rows, rows]), np.concatenate([below, above]))),
+                      shape=(len(rows), n_var)).tocsr()
+    b_ub = -np.ones(len(rows))
+    bounds = np.zeros((n_var, 2))
+    bounds[:, 1] = np.inf
+    bounds[var[ins], 1] = 0.0
+    span = (np.bincount(var[dst], minlength=n_var)
+            - np.bincount(var[src], minlength=n_var)).astype(float)
+
+    # The least total span first.  The constraint matrix is totally unimodular, so the
+    # vertex solutions of both solves are integral, the dual ones of the first included.
+    first = _linprog(linprog, span, A_ub=a_ub, b_ub=b_ub, bounds=bounds)
+    if first.status != 0:
+        return _longest_path_ranks(sketch)
+    least = round(first.fun)
+
+    # The rankings of least span are, by complementary slackness, the rankings meeting
+    # with equality every row whose dual value is not zero, with every variable whose
+    # reduced cost is not zero at its bound.  The least sum of ranks over them is the
+    # ranking taking at each node the least rank of any of them, which is unique however
+    # the solver breaks ties.  The dual values of a vertex are integers, so 0.5 separates
+    # zero from not zero.
+    tight = np.abs(first.ineqlin.marginals) > 0.5
+    held = bounds.copy()
+    at_bound = np.abs(first.lower.marginals) > 0.5
+    held[at_bound, 1] = held[at_bound, 0]
+    loose = ~tight
+    second = _linprog(linprog, np.ones(n_var),
+                      A_ub=a_ub[loose] if loose.any() else None,
+                      b_ub=b_ub[loose] if loose.any() else None,
+                      A_eq=a_ub[tight] if tight.any() else None,
+                      b_eq=b_ub[tight] if tight.any() else None,
+                      bounds=held)
+    if second.status != 0:
+        return _longest_path_ranks(sketch)
+
+    x = np.round(second.x).astype(np.int64)
+    if ((x[above] - x[below] < 1).any() or (x < 0).any() or (x[var[ins]] != 0).any()
+            or int(span @ x) != least):
+        return _longest_path_ranks(sketch)
+    return x[var].tolist()
+
+
+def _longest_path_ranks(sketch: Sketch) -> list[int]:
+    """The rank of every node: 0 at the bottom, one above the highest rank feeding it.
+
+    The output markers share the rank above every other node.  This satisfies the
+    constraints of `_ranks` but leaves every operation reading nothing on rank 0, however
+    far up its readers are.
+    """
     n = len(sketch.nodes)
     succs: list[list[int]] = [[] for _ in range(n)]
     indegree = [0] * n
@@ -123,20 +243,9 @@ def _ranks(sketch: Sketch) -> list[int]:
 
     outs = {i for i, node in enumerate(sketch.nodes)
             if node.kind is GlyphKind.BOUNDARY and not succs[i]}
-    if outs:
-        # Every output wire reaches one line, so the top of the picture is straight.
-        top = max((r for i, r in enumerate(rank) if i not in outs), default=-1) + 1
-        for i in outs:
-            rank[i] = top
-
-    for i, node in enumerate(sketch.nodes):
-        if node.op is None or node.n_in:
-            continue
-        readers = [rank[w] for d in succs[i] for w in succs[d]]
-        if readers:
-            rank[i] = max(0, min(readers) - 2)
-            for d in succs[i]:
-                rank[d] = rank[i] + 1
+    top = max((r for i, r in enumerate(rank) if i not in outs), default=-1) + 1
+    for i in outs:
+        rank[i] = top
     return rank
 
 
@@ -286,21 +395,7 @@ def _inversions(values: list[float]) -> int:
     return total
 
 
-# -- coordinates -----------------------------------------------------------------------
-
-def _separation(g: _Layered, a: int, b: int, style: Style) -> float:
-    """The least distance between the centres of neighbours `a` and `b` on one rank.
-
-    An interface marker is drawn past either end of the picture rather than on the rank it
-    was ranked onto, so it can never meet anything but another marker and needs no room
-    against one.  Charging it the width of its own label would push the wire it ends off
-    the vertical.
-    """
-    if g.is_edge[a] != g.is_edge[b]:
-        return 0.0
-    gap = style.node_sep * (0.6 if g.is_dummy[a] and g.is_dummy[b] else 1.0)
-    return (g.width[a] + g.width[b]) / 2 + gap
-
+# -- ordinates -------------------------------------------------------------------------
 
 # Which of the wires leaving a rank the gap above it is set by.  The widest would let one
 # wire stretch a whole picture; the middle one would leave most of a busy rank flat.
@@ -386,7 +481,6 @@ def _measure(sketch: Sketch, g: _Layered, glyphs, x, y, style: Style) -> Placeme
         right - left + 2 * style.margin,
         top - bottom + 2 * style.margin,
     )
-
 
 
 def _route(sketch: Sketch, e, chain, glyphs, x, y) -> list[tuple[float, float]]:

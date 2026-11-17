@@ -3,10 +3,10 @@
 Four groups of five animals were exposed to a toxin at four doses, and 0, 1, 3 and 5 of
 them died [1].  An animal at dose `x` dies with probability ``logistic(alpha + beta * x)``,
 and the dose at which that probability crosses one half, called LD50, is the standard
-summary of the toxin's strength.  Gelman et al. treat this experiment as their bioassay
-example and compute the posterior of ``(alpha, beta)`` by discretising it on a grid [2];
-the DPPs below are that same analysis, the inference on the grid being done by the exact
-engine, and LD50, a nonlinear function of both parameters, being one more variable:
+summary of the toxin's strength.  The bioassay example of [2] computes the posterior of
+``(alpha, beta)`` by discretising it on a grid; the DPPs below are that analysis, on the
+50 x 50 grid of [3], the inference on the grid being done by the exact engine, and LD50, a
+nonlinear function of both parameters, being one more variable:
 
     >>> from pylea import expectation, prob
     >>> round(expectation(lethal_dose, method="exact"), 4)
@@ -28,6 +28,8 @@ which normalising cancels.
         experiences in the pharmaceutical industry.  Appl Stat. 1986;35(2):93-150.
     [2] Gelman A, Carlin JB, Stern HS, Dunson DB, Vehtari A, Rubin DB.  Bayesian Data
         Analysis.  3rd ed.  Chapman and Hall/CRC; 2013.  Section 3.7.
+    [3] Vehtari A, Paasiniemi M.  Bayesian data analysis demo 3.6.  BDA R demos.
+        https://github.com/avehtari/BDA_R_demos/blob/master/demos_ch3/demo3_6.R
 """
 import math
 
@@ -46,12 +48,12 @@ def _grid(low: float, high: float, points: int) -> list[float]:
 
 
 class Alpha(Enum):
-    """The intercept, on the grid Gelman et al. use; the prior is uniform on it."""
+    """The intercept, 50 values from -4 to 8, with a uniform prior."""
     elements = _grid(-4.0, 8.0, 50)
 
 
 class Beta(Enum):
-    """The slope per unit log dose, on the same reference's grid."""
+    """The slope per unit log dose, 50 values from -10 to 40, with a uniform prior."""
     elements = _grid(-10.0, 40.0, 50)
 
 

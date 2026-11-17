@@ -34,27 +34,26 @@ one negative test result:
     5.051e-05
 
 A DPP calls other DPPs as ordinary functions, as `has_disease` calls `test` twice.  The same
-DPP is `pylea.examples.disease`.  Pylea's DSL includes many more features, most of them 
-demonstrated in the examples and guide below.
+DPP is `pylea.examples.disease`.  The language has more constructions, shown in the
+examples and the guide below.
 
 
 ## Examples
 
-Each example links to a notebook, shown with its output and available for download, and
-illustrates a class of models for which Pylea can be used. 
+Each example is a notebook, shown with its output and available for download, for one
+class of models.
 
-- **Fault trees**: [This notebook](examples/fault_trees.html) shows how to build 
-  *fault trees* in Pylea. These are used in reliability engineering to 
-  estimate the failure probability of safety-critical systems.
-- **Bayesian networks**: [Bayesian networks](examples/bayesian_networks.html) can be understood
-  as special examples of DPPs. Pylea enables flexible queries on Bayesian networks, easy
-  integration with other classes of discrete probabilistic models, and fast inference.
-- **Discrete Bayesian statistics**: [This example](examples/bayesian_statistics.html) 
-  goes through examples of using Pylea for Bayesian statistics, including classic textbook problems
-  based on historical real-world applications.
-- **Games of chance**: [This notebook](examples/games_of_chance.html) illustrates that Pylea
-  can be used to compute winning probabilities in games of chance using the classic 
-  *Monty Hall problem* and *Texas hold'em poker* as examples.
+- **Fault trees**: [This notebook](examples/fault_trees.html) writes *fault trees*, which
+  reliability engineering uses for the failure probability of a system, as DPPs, and
+  converts a fault tree in the `.dft` format.
+- **Bayesian networks**: [This notebook](examples/bayesian_networks.html) writes a
+  Bayesian network as conditional probability tables, queries it with evidence, and
+  converts a network in the `.bif` format.
+- **Discrete Bayesian statistics**: [This notebook](examples/bayesian_statistics.html)
+  computes posterior distributions for the bias of a coin, the German tank problem and a
+  bioassay.
+- **Games of chance**: [This notebook](examples/games_of_chance.html) computes the
+  probability of winning in the *Monty Hall problem* and in *Texas hold'em poker*.
 
 `pylea.utility` converts Bayesian networks in the `.bif` format and fault trees in the
 `.dft` format into DPPs.  More example DPPs are in `pylea.examples`.
@@ -137,9 +136,8 @@ conditional on `e`, and so does a query of any DPP calling this one.
     >>> round(prob(first_given_either), 6)
     0.666667
 
-``observe(e, if_true=0.9, if_false=0.3)`` conditions on the report of an unreliable witness
-that `e` is true: the report has probability 0.9 where `e` is true and 0.3 where it is
-false.
+``observe(e, if_true=0.9, if_false=0.3)`` multiplies the weight of each combination of
+values by 0.9 where `e` is true and by 0.3 where it is false, instead of by 1 and 0.
 
 ### Enumerations: `Enum`
 
@@ -152,15 +150,19 @@ An `Enum` type lists its values in `elements`:
     ... def weather() -> Weather:
     ...     return Weather.random({"dry": 0.7, "rain": 0.25, "snow": 0.05})
 
-`Enum.random` draws a value with the given probabilities, `Enum.uniform` draws every value
-with the same probability, and `Enum.const` is a fixed value, as in
-``Weather.const("dry")``.  A variable compares with `==` and `!=` against another of its
-type or against one of the `elements`.  `<`, `<=`, `>` and `>=` follow the order of
-`elements`, not the order of the values themselves.
+`Enum.random` draws a value with the given probabilities, given as a dict from elements
+to probabilities or as a list in the order of `elements`, as in
+``Weather.random([0.7, 0.25, 0.05])``.  `Enum.uniform` draws every value with the same
+probability, and `Enum.const` is a fixed value, as in ``Weather.const("dry")``.  A variable
+compares with `==` and `!=` against another of its type or against one of the `elements`.
+`<`, `<=`, `>` and `>=` follow the order of `elements`, not the order of the values
+themselves.  A value that is not one of the `elements` raises `ValueError`, here and
+wherever an element is expected.
 
 `Enum.match` chooses a variable or a value for each element, and needs a key for every
-element.  Where every choice is a value rather than a variable, `data_type` names the type
-of the result.  `Bool.match` is the same, with the keys `True` and `False`.
+element and no other key.  Where every choice is a value rather than a variable,
+`data_type` names the type of the result.  `Bool.match` is the same, with the keys `True`
+and `False`.
 
     >>> @DPP
     ... def slippery() -> Bool:
@@ -170,8 +172,9 @@ of the result.  `Bool.match` is the same, with the keys `True` and `False`.
     0.107
 
 `Enum.cpt` builds a conditional probability table: for each tuple of values of the
-parents, the probabilities of the elements, in the order of `elements`.  The table is
-called on the parent variables, as a DPP is:
+parents, the probabilities of the elements, as a list in the order of `elements` or as a
+dict.  Every tuple of values of the parents needs a row.  The table is called on the
+parent variables, as a DPP is:
 
     >>> class Grass(Enum):
     ...     elements = ["dry", "damp", "wet"]
@@ -203,8 +206,8 @@ where it is left out.  It stores the result for every combination of values, and
 
 A `UInt` type holds the integers from 0 to ``2**width - 1``.  `+` adds two variables of
 the type, or a variable and a number.  The sum is taken modulo ``2**width``, so the type
-must be wide enough for the largest sum.  `count` gives the number of `Bool`s that are
-true; Python's `sum` does not work on variables.
+must be wide enough for the largest sum.  Python's `sum` adds a list of `UInt` variables,
+and `count` gives the number of `Bool`s that are true.
 
     >>> from pylea import UInt, count
     >>> class Heads(UInt):
@@ -222,8 +225,10 @@ true; Python's `sum` does not work on variables.
 A `Tuple` type combines several types into one: `Tuple.of` builds a value from one
 variable per type, and `Tuple.components` takes it apart again.  `pick` draws one of a
 list of variables, each with the same probability, and returns it with the rest of the
-list; given a number `n` as well, it draws `n` in turn.  The two together deal two cards
-from a deck of four:
+list; given a number `n` as well, it draws `n` in turn.  The rest is a
+`pylea.syntax.choice.Remainder`, which can be indexed, sliced, iterated, and given to
+`pick` again to draw more, all inside the same `@DPP` function.  The two together deal two
+cards from a deck of four:
 
     >>> from pylea import Tuple, pick
     >>> class Rank(Enum):
@@ -241,6 +246,10 @@ from a deck of four:
     ...     return (first_rank == "A") & (second_rank == "A")
     >>> round(prob(two_aces), 6)
     0.166667
+
+The cost of exact inference grows quickly with the number of draws a query depends on, so
+a query about the whole ordering of more than a few choices is a task for the sampling
+engine, below.
 
 ## Querying a DPP
 
@@ -272,20 +281,34 @@ asked about:
     5.0
 
 **An answer can be an estimate.**  The `method` argument selects how a query is computed:
-``"exact"`` computes the value exactly, ``"smc"`` estimates it by sampling, and ``"auto"``,
-the default, runs whichever is predicted to be faster.  A sampled answer is computed to
-relative error `rel_err`, 0.01 by default, and `seed` makes it reproducible.  Every answer
-is an `Estimate`, a float with the attributes `low` and `high`, which bound the true value
-with probability at least `confidence`, 0.95 by default; for an exact answer both equal
-the value.  Arithmetic on an `Estimate` gives a plain float, without the bounds.
+``"exact"`` computes the value exactly with the exact engine, ``"smc"`` estimates it with
+the sampling engine, and ``"auto"``, the default, runs whichever is predicted to be
+faster.  A sampled answer is computed to relative error `rel_err`, 0.01 by default, and
+`seed` makes it reproducible.  Every answer is an `Estimate`, a float with the attributes
+`low` and `high`, which bound the true value with probability at least `confidence`, 0.95
+by default; for an exact answer both equal the value.  Arithmetic on an `Estimate` gives a
+plain float, without the bounds.
 
     >>> p = prob(first_given_either, method="smc", rel_err=0.05, seed=0)
     >>> bool(p.low <= 2 / 3 <= p.high)
     True
 
+`max_time` bounds, in seconds, the time a query spends in either engine and in the choice
+between them.  It does not bound the preparation of a DPP for sampling, which the first
+query of the DPP that samples makes.  An exact query that runs past `max_time` raises
+`TimeoutError`.  A sampled answer that has not reached its relative error by then is
+returned with the interval reached, and a warning names the line of the query; under
+``strict=True`` the query raises `pylea.sample.estimate.TargetNotMetError` instead, whose
+`result` is that answer.
+
+The exact engine refuses a query whose tensor network is too large to contract, with
+`ExactInferenceTooLarge`, or whose contraction is estimated to take too long, with
+`ExactInferenceTooSlow`.  Under ``"exact"`` the refusal is raised; under ``"auto"`` the
+sampling engine answers instead where it can.
+
 `DPP.evaluated` gives the distribution of a DPP's outputs for each value of its inputs, as
-a `LikelihoodTable`.  Printed, it has one row per input value and one column per output
-value:
+a `LikelihoodTable`, with the exact engine unless ``method="smc"`` is passed.  Printed, it
+has one row per input value and one column per output value:
 
     >>> print(test.evaluated())
           | False | True
@@ -314,17 +337,18 @@ above:
 
 ![The diagram of test](test.svg)
 
-The wire entering at the bottom carries the parameter it stands for.  A wire leaving at the
-top is named the same way where the DPP returned a variable; this one returns an
-expression, which has no name to show.
+The line entering at the bottom carries the name of the parameter it stands for.  A line
+leaving at the top is named the same way where the DPP returned a variable; this one
+returns an expression, which has no name to show.
 
 `pylea.draw.Diagram.svg` gives the markup, `pylea.draw.Diagram.tikz` a figure for a LaTeX
 document, `pylea.draw.Diagram.save` a file, and `pylea.draw.Diagram.show` opens one in a
 browser; a notebook renders it where it stands.
 
 There is no nesting: a called DPP is drawn by asking it for its own diagram.
-`pylea.syntax.dpp.DPP.simplified` draws what the rewrite rules of `pylea.simplify` make of
-a DPP, which is how a DPP that compiles more slowly than expected is read.
+`pylea.syntax.dpp.DPP.simplified` returns the DPP that the rewrite rules of
+`pylea.simplify` make of a DPP; its diagram shows what simplification left, which helps to
+find why a DPP compiles more slowly than expected.
 
 `pylea.syntax.dpp.DPP.dependency_graph` draws the DPP's variables instead of its
 assignments: one box per variable the DPP is given or returns, and an arrow to each
@@ -348,15 +372,19 @@ conditioning is not drawn at all.
 
   * `pylea.syntax`, the language: `@DPP`, variables, and the primitives beneath.
   * `pylea.semantics`, the matrices of the primitives and the semantics of a DPP.
-  * `pylea.ir`, the intermediate representation a DPP is traced into.
-  * `pylea.simplify`, the rewrite rules applied to a DPP before it is lowered.
-  * `pylea.compile`, the tensor network, the contraction tree, and the resulting plans.
-  * `pylea.eval`, running a plan on numpy or on a torch device.
-  * `pylea.sample`, the sampling engine and the choice between the two engines.
+  * `pylea.ir`, the intermediate representation in which a DPP is recorded.
+  * `pylea.simplify`, the rewrite rules applied to a DPP before compilation.
+  * `pylea.compile`, compilation: the tensor network and its contraction tree.
+  * `pylea.eval`, the exact engine's contraction of a compiled DPP with numpy or torch.
+  * `pylea.sample`, the sampling engine and the portfolio algorithm, which chooses between
+    the two engines.
   * `pylea.draw`, drawing a DPP as a diagram.
   * `pylea.utility`, converters from `.bif` Bayesian networks and `.dft` fault trees.
   * `pylea.examples`, example DPPs.
 """
+from pylea.compile.lower import (
+    ExactInferenceInfeasible, ExactInferenceTooLarge, ExactInferenceTooSlow,
+)
 from pylea.semantics.likelihood_table import LikelihoodTable
 from pylea.syntax.choice import pick
 from pylea.syntax.dpp import DPP, Bool, at_least
@@ -373,4 +401,5 @@ from pylea.syntax.variable import Variable
 
 __all__ = ["DPP", "Bool", "Enum", "Tuple", "UInt", "Variable", "flip", "observe",
            "at_least", "count", "pick", "prob", "probability_mass_function",
-           "expectation", "Estimate", "LikelihoodTable"]
+           "expectation", "Estimate", "LikelihoodTable", "ExactInferenceInfeasible",
+           "ExactInferenceTooLarge", "ExactInferenceTooSlow"]

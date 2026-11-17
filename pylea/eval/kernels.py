@@ -181,8 +181,8 @@ def spread(B, t, shape, positions):
 def contract(B, a, b, batch, left, sum_, right):
     """One batched matrix multiplication of operands already in ``batch, left, sum`` order.
 
-    Every contraction step in a plan is one of these; the permutations that bring the
-    operands into that order are separate steps.
+    Every `Contract` step of a plan ends in one of these; the permutations that bring the
+    operands into that order are part of the same step and run before it.
 
         >>> from pylea.eval.backend import NumpyBackend
         >>> B = NumpyBackend()

@@ -23,16 +23,22 @@ because the rules come in contrapositive pairs; in a body without negations only
 literals of the wires themselves are needed, their negations never entering a derivation,
 and only those are held.  Only the literals of wires that some gate reads or produces are
 held at all.  The matrix takes ``n * n / 8`` bytes for `n` literals held; a sparse form
-would take less only where few pairs of literals are related.
+would take less only where few pairs of literals are related.  Each round reads the whole
+matrix, so a round takes time proportional to ``n * n``.
 
 A literal implying itself is left implicit, each join adding the literals it joins where
 they belong to the result, so that building the matrix writes nothing up front: memory is
-taken as rows are joined.  Given a
-deadline, nothing is allocated where it has passed already, and the computation stops once
-it passes, part way through a round if need be.  Every bit set is a valid implication at any
-point, so the relation then holds a subset of the implications; a rule reading it fires at
-fewer sites and nowhere it should not.  Without a deadline the whole matrix is computed,
-whatever its size.
+taken as rows are joined.  Every bit set is a valid implication at any point, so a
+relation stopped early holds a subset of the implications; a rule reading it fires at
+fewer sites and nowhere it should not.  Two bounds stop it early:
+
+  * A body whose matrix would take more than `MAX_RELATION_BYTES`, about 23,000 literals,
+    gets no matrix at all: no literal is held, and each literal implies itself alone.
+    This applies with or without a deadline.
+  * Given a deadline, nothing is allocated where it has passed already, and the
+    computation stops once it passes, part way through a round if need be.
+
+`complete` says whether the relation holds every implication.
 """
 from __future__ import annotations
 
@@ -42,6 +48,11 @@ from pylea.ir.body import Body
 from pylea.ir.prim import Tag
 
 from pylea.simplify.common import expired, gate_tag, neg, pos
+
+# The largest matrix a body's relation may take, in bytes: the rows of about 23,000
+# literals.  It bounds the memory `pylea.simplify.absorb` takes on one body, with or
+# without a deadline.
+MAX_RELATION_BYTES = 64 << 20
 
 
 class Implications:
@@ -67,6 +78,8 @@ class Implications:
         touched = sorted({w for op in gates for w in op.args + op.outs})
         held = [pos(w) for w in touched] if monotone else [
             lit for w in touched for lit in (pos(w), neg(w))]
+        if _relation_bytes(len(held)) > MAX_RELATION_BYTES:
+            stopped, gates, held = True, [], []
         self.n = n = len(held)
         # The row of each literal held, and -1 for the others.
         self.index = np.full(2 * len(body.bits), -1, dtype=np.intp)
@@ -122,6 +135,11 @@ class Implications:
         if i < 0 or j < 0:
             return False                        # a literal held by no row implies itself alone
         return bool((self.rows[i, j >> 3] >> (j & 7)) & 1)
+
+
+def _relation_bytes(n: int) -> int:
+    """The bytes the matrix of a relation over `n` literals takes."""
+    return n * ((n + 7) // 8)
 
 
 def _close(rows: np.ndarray, up, down, pairs, deadline: float | None) -> bool:

@@ -1,11 +1,17 @@
 """Constant folding, and common subexpression elimination at the bottom of a body.
 
 A source is a primitive that reads nothing: a `flip`, a constant, or a table with no
-parents.  `const_fold` multiplies a source into the one op reading its results, so that a
+parents.  `const_fold` multiplies a source into the ops reading its results, so that a
 `flip` feeding a table becomes a column of the table and the negation of a `flip` becomes
-the `flip` of the opposite probability.  A gate is folded this way only when all of its
-arguments are such sources, the result then reading nothing; a gate with one source
-argument and one other keeps its tag, which the rules matching on tags rely on.
+the `flip` of the opposite probability.  A constant goes into every reader admitting it,
+and stays for the others; any other source goes into its one reader.  A gate is folded
+this way only when all of its arguments are such sources, the result then reading
+nothing; a gate with one source argument and one other keeps its tag, which the rules
+matching on tags rely on.  A reader left reading nothing is a source in turn, and is
+folded into its own reader in the same sweep over the body, so a chain of tables below a
+source folds into one source in one application of the rule.  The result is not always
+a fixed point of the rule: a selection into which a source is folded becomes a table,
+which admits a constant that the selection did not.
 
 `block_fold` folds a block of gates computed from sources of one bit alone, the coin flips
 of `pylea.simplify.common.is_flip`, into one source.  The block is the cone of gates below
@@ -30,6 +36,7 @@ the contraction cost from rising.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 
 import numpy as np
@@ -41,13 +48,15 @@ from pylea.ir.program import Program
 
 from pylea.simplify.common import (
     canonical, composed, constant_bits, each_body, expired, gate_tag, is_flip, is_gate,
-    is_source, neg, pos,
+    is_source, neg, pos, product_in_range,
 )
 
 
 def const_fold(prog: Program) -> Program:
-    """`prog` with each source multiplied into the one op reading its results.
+    """`prog` with each source multiplied into the ops reading its results.
 
+    A constant goes into every reader admitting it, any other source into its one reader,
+    and a reader left reading nothing is folded on into its own reader in the same sweep.
     A `flip` feeding one table becomes a column of the table:
 
         >>> from pylea.ir.body import BodyBuilder
@@ -112,47 +121,59 @@ def _fold_sources(body: Body) -> Body:
         for w in op.args:
             readers[w].add(k)
     outputs = set(body.outputs)
+    made_at = {w: k for k, op in enumerate(body.ops) for w in op.outs}
 
-    # host op -> the sources folded into it.  A constant is folded into every reader that
-    # admits it, each reader taking a private copy; any other source into its one reader.
-    by_host: dict[int, list[int]] = defaultdict(list)
-    for k, op in enumerate(body.ops):
-        if not is_source(op.callee):
+    # `current[k]` is the op at position `k` with the sources folded into it so far, and
+    # `taken[j]` the positions of the sources folded into the op at `j`.  A constant is
+    # folded into every reader that admits it, each reader taking a private copy; any other
+    # source into its one reader.  An op left reading nothing is a source for its own
+    # readers further on.
+    current = list(body.ops)
+    taken: dict[int, list[int]] = {}
+    for j, op in enumerate(body.ops):
+        if not op.args or not isinstance(op.callee, Prim):
             continue
-        hosts = set().union(*(readers[w] for w in op.outs))
-        constant = constant_bits(op.callee) is not None
-        if not constant and (len(hosts) != 1 or any(w in outputs for w in op.outs)
-                             or any(not readers[w] for w in op.outs)):
+        accepted: list[int] = []
+        for k in sorted({made_at[w] for w in op.args if w in made_at}):
+            source = current[k]
+            if not is_source(source.callee):
+                continue
+            constant = constant_bits(source.callee) is not None
+            if not constant and (any(readers[w] != {j} for w in source.outs)
+                                 or any(w in outputs for w in source.outs)):
+                continue
+            if _admits(op, constant) and (constant or _keeps_range(
+                    op, [current[i] for i in accepted] + [source])):
+                accepted.append(k)
+        fed = {w for k in accepted for w in current[k].outs}
+        if not accepted or (is_gate(op.callee) and not all(w in fed for w in op.args)):
             continue
-        for j in hosts:
-            if _admits(body.ops[j], constant):
-                by_host[j].append(k)
-    for j, ks in list(by_host.items()):
-        host = body.ops[j]
-        fed = {w for k in ks for w in body.ops[k].outs}
-        if is_gate(host.callee) and not all(w in fed for w in host.args):
-            del by_host[j]
-    if not by_host:
+        host = op
+        for k in accepted:
+            source = current[k]
+            args = tuple(w for w in host.args if w not in source.outs)
+            host = Op(composed(source, host, host.outs, args), args, host.outs)
+        current[j] = host
+        taken[j] = accepted
+    if not taken:
         return body
 
-    gone = {k for ks in by_host.values() for k in ks}
-    for k in list(gone):                            # a constant stays for its other readers
-        op = body.ops[k]
-        if any(w in outputs for w in op.outs) or any(
-                j not in by_host or k not in by_host[j]
-                for w in op.outs for j in readers[w]):
-            gone.discard(k)
+    # A source goes where every reader of every result took it; a constant stays, in its
+    # `current` form, for its other readers.
+    gone = {k for ks in taken.values() for k in ks
+            if not any(w in outputs for w in current[k].outs)
+            and all(k in taken.get(j, ()) for w in current[k].outs for j in readers[w])}
+    ops = tuple(op for k, op in enumerate(current) if k not in gone)
+    return prune_wires(Body(body.bits, body.inputs, body.outputs, ops))
 
-    ops: list[Op] = []
-    for j, op in enumerate(body.ops):
-        if j in gone:
-            continue
-        for k in by_host.get(j, ()):
-            source = body.ops[k]
-            args = tuple(w for w in op.args if w not in source.outs)
-            op = Op(composed(source, op, op.outs, args), args, op.outs)
-        ops.append(op)
-    return prune_wires(Body(body.bits, body.inputs, body.outputs, tuple(ops)))
+
+def _keeps_range(host: Op, sources: list[Op]) -> bool:
+    """Whether folding every one of `sources` into `host` keeps the product's entries in
+    the float64 range; `pylea.simplify.common.product_in_range` says why that matters."""
+    if not isinstance(host.callee, Prim):
+        return False
+    summed = sum(len(source.outs) for source in sources)
+    return product_in_range([host.callee] + [source.callee for source in sources], summed)
 
 
 def _admits(host: Op, constant: bool) -> bool:
@@ -165,7 +186,7 @@ def _admits(host: Op, constant: bool) -> bool:
     rules over gates match on; that condition is checked by the caller over all of the
     gate's arguments.
     """
-    if isinstance(host.callee, int):
+    if not isinstance(host.callee, Prim):
         return False
     if constant:
         return not (is_gate(host.callee) or host.callee.tag is Tag.ITE)
@@ -359,6 +380,11 @@ def _literals(positive: int, negative: int):
 
 # ------------------------------------------------------------------------- blocks
 
+_TINY = float(np.finfo(np.float64).tiny)
+_LOG_TINY = math.log(_TINY)
+_LOG_MAX = math.log(float(np.finfo(np.float64).max))
+
+
 class _Blocks:
     """The gates of a body computed from coin flips alone, with their cones and weights.
 
@@ -456,6 +482,12 @@ class _Blocks:
         else:
             a, b = op.args
             (fa, ta), (fb, tb) = p[a], p[b]
+            # A product of two positive probabilities below the smallest normal float64
+            # has lost digits or become zero, so the block cannot be folded into one
+            # number; the exact engine keeps such values apart.
+            if any(0.0 < u * v < _TINY or (u > 0.0 and v > 0.0 and u * v == 0.0)
+                   for u in (fa, ta) for v in (fb, tb)):
+                foldable = False
             disjoint = not (self.dep[a] & self.dep[b])
             if tag is Tag.AND:
                 foldable = foldable and disjoint
@@ -517,19 +549,33 @@ class _Blocks:
         return all(self.clauses.conflict(_literals(*guards), excluded=cone, start=start)
                    for guards in pending)
 
-    def folded(self, y: int, dep: int | None = None, cone: int | None = None) -> Prim:
+    def folded(self, y: int, dep: int | None = None, cone: int | None = None) -> Prim | None:
         """The source standing for `y` once its cone is folded, its weight over the sources
-        of the cone that are read inside it alone."""
+        of the cone that are read inside it alone; `None` where an entry of that source
+        would leave the normal range of float64, which the exact engine would keep."""
         cone = self.cone[y] if cone is None else cone
         dep = self.dep[y] if dep is None else dep
         # A source kept for its other readers is a distribution, its column summing to 1,
         # so the weight of `y` over all of its sources is the weight over the removed ones.
-        mass = 1.0
+        log_mass = 0.0
         for w in self.sources(dep):
             if not self.reading[w] & ~cone:
-                mass *= self.source_mass[self.source_bit[w]]
+                m = self.source_mass[self.source_bit[w]]
+                if m <= 0.0:
+                    log_mass = -math.inf
+                    break
+                log_mass += math.log(m)
         false, true = self.probability[y]
-        return canonical(Prim.from_matrix([[mass * false], [mass * true]]))
+        entries = []
+        for q in (false, true):
+            if q == 0.0 or log_mass == -math.inf:
+                entries.append(0.0)
+                continue
+            log_entry = log_mass + math.log(q)
+            if not _LOG_TINY <= log_entry <= _LOG_MAX:
+                return None
+            entries.append(math.exp(log_entry))
+        return canonical(Prim.from_matrix([[entries[0]], [entries[1]]]))
 
     def removed(self, cone: int, dep: int) -> int:
         """The ops of `cone` together with the sources in `dep` read inside it alone."""
@@ -571,8 +617,13 @@ def _fold_blocks(body: Body, deadline: float | None = None) -> Body:
     replacement: dict[int, Op] = {}
     removed = 0
     for y in qualifying:
-        replacement[blocks.at[y]] = Op(blocks.folded(y), (), (y,))
+        source = blocks.folded(y)
+        if source is None:
+            continue
+        replacement[blocks.at[y]] = Op(source, (), (y,))
         removed |= blocks.removed(blocks.cone[y], blocks.dep[y])
+    if not replacement:
+        return body
     return _rebuilt(body, replacement, removed)
 
 
@@ -613,7 +664,10 @@ def _merge_bottom(body: Body, deadline: float | None = None) -> Body:
             continue
         if blocks.shared_sources(first, cone):
             continue
-        replacement[members[0]] = Op(blocks.folded(first, cone=cone), (), (first,))
+        source = blocks.folded(first, cone=cone)
+        if source is None:
+            continue
+        replacement[members[0]] = Op(source, (), (first,))
         for w in wires[1:]:
             aliased[w] = first
         removed |= blocks.removed(cone, blocks.dep[first]) & ~(1 << members[0])

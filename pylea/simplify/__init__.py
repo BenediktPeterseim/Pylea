@@ -16,7 +16,7 @@ The rewrite rules, each in its own module:
     the bottom of a body.
   * `pylea.simplify.cse`: common subexpression elimination over a private coin flip.
   * `pylea.simplify.absorb`: absorption by implication.
-  * `pylea.simplify.lift`: flip lifting, of a coin flip read by several disjunctions.
+  * `pylea.simplify.lift`: lifting of a coin flip read by several disjunctions.
   * `pylea.simplify.mask`: masked reads.
 
 The removal of a body nothing calls, and the merging of equal bodies, happen in the loop
@@ -26,6 +26,11 @@ Wherever a rule is stated for a coin flip, it takes any primitive that reads not
 produces one bit, whatever its weights, as `pylea.simplify.common.is_flip` says, and
 constant folding takes the determinism of a table off its matrix; this is what the opaque
 tables of Bayesian networks need.
+
+Five rules share their name with the module defining them: `dce`, `inline`, `absorb`,
+`lift` and `mask`.  Here the name is the function, so ``pylea.simplify.lift`` and ``import
+pylea.simplify.lift as m`` give the function; the module is
+``importlib.import_module("pylea.simplify.lift")``.
 """
 
 from pylea.simplify.absorb import absorb

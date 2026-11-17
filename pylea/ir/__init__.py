@@ -7,9 +7,11 @@ carries a dense matrix, or another body by index.  A wire is a variable, of the 
 ``bits[w]``.  A primitive reads and writes one wire per bit, and `pylea.syntax` allocates
 one-bit wires, so a variable of several bits is there several wires.
 
-`pylea.ir.program` measures and interns DPPs, `pylea.ir.inline` splices a call site, and
+`pylea.ir.program` measures and interns DPPs, `pylea.ir.inline` splices calls, and
 `pylea.ir.dependency` says which interface wires of a body are computed from which.
-`pylea.ir.bits` reads the members of a set of integers held as the bits of an integer.
+`pylea.ir.reference` computes the semantics of a small DPP by enumeration, as a test
+oracle.  `pylea.ir.bits` reads the members of a set of integers held as the bits of an
+integer.
 """
 from pylea.ir.body import ArityError, Body, BodyBuilder, Op, prune_wires, signature
 from pylea.ir.dependency import direct_dependencies
@@ -18,8 +20,7 @@ from pylea.ir.prim import (
 )
 from pylea.ir.program import (
     Program, consumer_counts, deterministic, discardable, intern, intern_with_remap,
-    multi_parent_wires, reachable, shared_reads, op_count, use_counts, validate,
-    wire_slots,
+    reachable, shared_reads, op_count, use_counts, validate,
 )
 
 __all__ = [
@@ -28,6 +29,6 @@ __all__ = [
     "Prim", "Tag", "BOOLEAN", "CONDITIONING", "STOCHASTIC", "is_indicator", "is_stochastic",
     "Program", "reachable", "use_counts", "op_count", "intern",
     "intern_with_remap", "validate",
-    "consumer_counts", "multi_parent_wires", "shared_reads", "wire_slots",
+    "consumer_counts", "shared_reads",
     "discardable", "deterministic",
 ]

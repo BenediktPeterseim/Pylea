@@ -24,9 +24,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-    "numpy",
-    "scipy",
-    "cotengra",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "cotengra>=0.7.5",
     "cotengrust",
 ]
 

@@ -197,3 +197,172 @@ def test_a_network_past_55156_indices_gets_distinct_symbols_cotengra_can_encode(
     assert len(symbols) == n + 1 == len(label)
     for s in symbols:
         s.encode("utf-8")
+
+
+def test_an_invalid_kappa_or_finder_is_refused_with_a_message():
+    from pylea.compile.lower import compile_program
+    from pylea.compile.planner import plan_compilation
+
+    prog, _net = _network(0)
+    for kappa in (-1, 2.5):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            compile_program(prog, kappa=kappa)
+        with pytest.raises(ValueError, match="non-negative integer"):
+            plan_compilation(prog, kappa=kappa)
+    for finder in ("greedy", object(), AdaptiveOrderFinder):
+        with pytest.raises(TypeError, match="GreedyOrderFinder"):
+            compile_program(prog, finder, kappa=KAPPA)
+    plans, _root = compile_program(prog, kappa=0)
+    assert plans
+
+
+def test_a_finder_reached_through_attribute_forwarding_or_added_later_is_accepted():
+    from pylea.compile.order import GreedyOrderFinder, check_finder_and_kappa
+
+    class Forwarding:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    assert check_finder_and_kappa(Forwarding(GreedyOrderFinder()), 3) == 3
+
+    class Late:
+        pass
+
+    with pytest.raises(TypeError):
+        check_finder_and_kappa(Late(), 3)
+    Late.find = GreedyOrderFinder.find                       # type: ignore[attr-defined]
+    assert check_finder_and_kappa(Late(), 3) == 3
+
+
+def test_a_finder_whose_find_is_a_property_is_accepted():
+    from pylea.compile.order import GreedyOrderFinder, check_finder_and_kappa
+
+    class Wrapped:
+        @property
+        def find(self):
+            return GreedyOrderFinder().find
+
+    assert check_finder_and_kappa(Wrapped(), 3) == 3
+
+
+# A script with no ``if __name__ == "__main__"`` guard that escalates in its own process and
+# in a bounded subprocess.  A pool of processes started by the search in the script's own
+# process would run the script again in each of its processes.
+_ESCALATING_SCRIPT = """
+import pylea.compile.order as order
+from pylea.compile.order import AdaptiveOrderFinder
+
+order.BOUND_GRACE_S = 3.0
+
+def grid(n):
+    index = {}
+    def edge(a, b):
+        return index.setdefault(tuple(sorted((a, b))), len(index))
+    tensors = [tuple(edge((i, j), (i + di, j + dj))
+                     for di, dj in ((0, 1), (1, 0), (0, -1), (-1, 0))
+                     if 0 <= i + di < n and 0 <= j + dj < n)
+               for i in range(n) for j in range(n)]
+    return tensors, (), {k: 2 for k in range(len(index))}
+
+indices, output, size = grid(6)
+AdaptiveOrderFinder(escalate_cost=0.0).find(indices, output, size, kappa=8)
+AdaptiveOrderFinder(escalate_cost=0.0, max_time=1.0).find(indices, output, size, kappa=8)
+# A network whose cost exceeds the float range, on which cotengra's trials fail.  A search
+# stopped at its bound still shows what the worker wrote until then.
+n = 1100
+try:
+    AdaptiveOrderFinder(escalate_cost=0.0, max_time=1.0).find(
+        [(k,) for k in range(n)], tuple(range(n)), {k: 2 for k in range(n)})
+except TimeoutError:
+    pass
+print("searched")
+"""
+
+
+def _run_escalating_script(tmp_path, hidden=()):
+    """The escalating script's output, run with the modules `hidden` made unimportable."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    import pylea
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(
+        "import sys\n" + "".join(f"sys.modules[{name!r}] = None\n" for name in hidden))
+    root = str(Path(pylea.__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(site), root])}
+    env.pop("PYTHONWARNINGS", None)
+    return subprocess.run([sys.executable, "-c", _ESCALATING_SCRIPT], env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_escalation_in_the_callers_process_starts_no_process(tmp_path):
+    result = _run_escalating_script(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["searched"]
+
+
+def test_cotengra_warnings_do_not_reach_the_caller(tmp_path):
+    """Without kahypar and the optional optimisation libraries cotengra warns once per
+    process that searches, and its failed trials warn on a network whose cost exceeds
+    the float range."""
+    result = _run_escalating_script(tmp_path, ("kahypar", "optuna", "cmaes", "nevergrad"))
+    assert result.returncode == 0, result.stderr
+    for text in ("kahypar", "Couldn't", "Trial error", "Warning:"):
+        assert text not in result.stderr.replace("OMP: Warning #179", ""), result.stderr
+
+
+def test_finders_with_equal_settings_compare_equal_and_share_a_compiled_plan():
+    from pylea import DPP, Bool, flip
+    from pylea.compile.order import (
+        AdaptiveOrderFinder, GreedyOrderFinder, SlicedBestOfOrderFinder,
+    )
+
+    @DPP
+    def both() -> Bool:
+        return flip(0.3) & flip(0.5)
+
+    for make in (GreedyOrderFinder, AdaptiveOrderFinder, SlicedBestOfOrderFinder):
+        assert make() == make() and hash(make()) == hash(make())
+        assert both.compiled(order_finder=make()) is both.compiled(order_finder=make())
+    assert SlicedBestOfOrderFinder(seed=1) != SlicedBestOfOrderFinder(seed=2)
+    assert AdaptiveOrderFinder() != SlicedBestOfOrderFinder()
+
+
+def test_slicing_never_aims_below_the_largest_leaf():
+    import numpy as np
+
+    from pylea import DPP, Enum, flip, observe
+    from pylea.compile.lower import compile_program
+    from pylea.compile.order import GreedyOrderFinder
+    from pylea.simplify import simplify
+
+    class W(Enum):
+        elements = ["sun", "cloud", "rain", "snow"]
+
+    rows = np.random.default_rng(1).dirichlet(np.ones(4), size=4)
+    emits = [0.1, 0.4, 0.8, 0.6]
+    step = W.cpt([W], {(w,): list(rows[i]) for i, w in enumerate(W.elements)})
+    seen = list(np.random.default_rng(0).integers(0, 2, 30).astype(bool))
+
+    @DPP
+    def last_state() -> W:
+        s = W.uniform()
+        for k, o in enumerate(seen):
+            if k > 0:
+                s = step(s)
+            u = s.match({w: flip(e) for w, e in zip(W.elements, emits)})
+            observe(u if o else ~u)
+        return s
+
+    # The largest tensor is a table of 16 entries, which already exceeds 2**3, so slicing
+    # to 2**3 could only multiply the work: 4,194,304 slices before the floor.
+    plans, root = compile_program(simplify(last_state.program()), GreedyOrderFinder(),
+                                  kappa=3)
+    assert plans[root].peak_entries() == 16
+    assert all(plan.n_slices == 1 for plan in plans.values())

@@ -63,7 +63,22 @@ def test_a_map_too_wide_for_a_dense_matrix_is_refused():
     class Wide(Enum):
         elements = range(1 << 11)
 
-    with pytest.raises(ValueError, match="circuit"):
+    with pytest.raises(ValueError, match=r"more than the 2\*\*20"):
         @DPP
         def wide() -> Wide:
             return Wide.uniform().map(lambda v, w: v, Wide.uniform())
+
+
+@pytest.mark.parametrize("returned", [2, "yes", None])
+def test_a_map_to_bool_returning_something_other_than_a_bool_names_the_value(returned):
+    with pytest.raises(ValueError, match=f"f returned {returned!r}, which Bool cannot hold"):
+        @DPP
+        def bad() -> Bool:
+            return Die.uniform().map(lambda v: returned, data_type=Bool)
+
+
+def test_a_python_type_given_as_data_type_is_refused():
+    with pytest.raises(TypeError, match="data_type must be a variable type"):
+        @DPP
+        def bad() -> Bool:
+            return Die.uniform().map(lambda v: v > 3, data_type=bool)

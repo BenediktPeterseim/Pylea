@@ -83,3 +83,31 @@ def test_soft_observation_certifies_on_the_sampling_lane():
     estimate = prob(reported, method="smc", rel_err=0.05, seed=0)
     assert isinstance(estimate, Estimate)
     assert estimate.low <= 0.14 / 0.22 <= estimate.high
+
+
+def test_numpy_likelihoods_are_accepted():
+    @DPP
+    def reported() -> Bool:
+        x = flip(0.5)
+        observe(x, if_true=np.float32(0.9), if_false=np.float64(0.3))
+        return x
+
+    assert prob(reported, method="exact") == pytest.approx(0.75, rel=1e-7)
+
+
+def test_a_likelihood_that_is_not_a_number_is_refused():
+    with pytest.raises(TypeError, match="if_true must be a number"):
+        @DPP
+        def bad() -> Bool:
+            x = flip(0.5)
+            observe(x, if_true="high")  # type: ignore[arg-type]
+            return x
+
+
+def test_an_invalid_likelihood_is_refused_even_beside_the_hard_default():
+    with pytest.raises(ValueError, match="if_false must be a finite non-negative"):
+        @DPP
+        def bad() -> Bool:
+            x = flip(0.5)
+            observe(x, if_true=1.0, if_false=float("nan"))
+            return x

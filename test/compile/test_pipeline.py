@@ -15,7 +15,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pylea.compile.lower import MAX_LEAF_BITS, PlanTooWide, compile_program, lower_body
+from pylea.compile.lower import (
+    MAX_LEAF_BITS, ExactInferenceTooLarge, compile_program, lower_body,
+)
 from pylea.compile.network import Tensor, Ones, build_network
 from pylea.compile.order import AdaptiveOrderFinder, GreedyOrderFinder
 from pylea.eval.interp import evaluate
@@ -47,7 +49,7 @@ def test_plan_agrees_with_exact_enumeration(kappa):
     for _ in range(60):
         prog = random_program(rng)
         try:
-            expected = semantics(prog, max_wires=16)
+            expected = semantics(prog, max_bits=16)
         except TooLarge:
             continue
         got = matrix_of(prog, kappa=kappa)
@@ -262,7 +264,7 @@ def test_peak_budget_is_enforced():
     builder = BodyBuilder()
     ws = [builder.emit(Prim.flip(0.5), [])[0] for _ in range(12)]
     prog = _program(builder.finish([], ws))
-    with pytest.raises(PlanTooWide):
+    with pytest.raises(ExactInferenceTooLarge):
         compile_program(prog, max_entries=64)
 
 
@@ -312,7 +314,7 @@ def test_order_finders_agree(finder):
     for _ in range(15):
         prog = random_program(rng)
         try:
-            expected = semantics(prog, max_wires=16)
+            expected = semantics(prog, max_bits=16)
         except TooLarge:
             continue
         plans, root = compile_program(prog, finder, kappa=6)

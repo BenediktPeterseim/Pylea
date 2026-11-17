@@ -1,7 +1,7 @@
 """The rewriting loop, the size measure, and the budget."""
 import pytest
 
-from pylea import DPP, Bool, Enum, prob
+from pylea import DPP, Bool, Enum, flip, prob
 from pylea.ir.body import Body, BodyBuilder, Op
 from pylea.ir.prim import Prim
 from pylea.ir.program import Program, intern
@@ -39,6 +39,23 @@ def test_size_counts_a_body_called_twice_once():
     (c,) = outer.emit(0, ())
     (r,) = outer.emit(Prim.and_(), (a, c))
     assert size(prog(callee, outer.finish((), (r,)))) == (2 + 2) + (2 + 2 + 2 + 4)
+
+
+def test_size_of_a_dpp_of_two_definitions_follows_the_definition_of_size():
+    @DPP
+    def noisy_not(x: Bool) -> Bool:
+        return ~x | flip(0.1)
+
+    @DPP
+    def main() -> Bool:
+        c = flip(0.5)
+        return noisy_not(c)
+
+    # Per assignment, one plus its numbers of input and output variables; per name, one
+    # plus its numbers of input and output variables plus the size of its definition.
+    noisy_not_size = (1 + 1 + 1) + (1 + 1 + 1) + (1 + 0 + 1) + (1 + 2 + 1)
+    main_size = (1 + 0 + 1) + (1 + 0 + 1) + (1 + 1 + 1)
+    assert size(main.program()) == noisy_not_size + main_size
 
 
 def test_simplify_lowers_the_size_and_keeps_the_answer():

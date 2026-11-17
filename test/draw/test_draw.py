@@ -8,6 +8,7 @@ naming an input has no box to hang the picture on.
 The properties of the layout itself hold for any sketch, so they run over the dependency
 graph of each model as well; what that picture must show is in `test.draw.test_dependency`.
 """
+import random
 import shutil
 import subprocess
 import xml.etree.ElementTree as ElementTree
@@ -15,17 +16,22 @@ import xml.etree.ElementTree as ElementTree
 import pytest
 
 from pylea import DPP, Bool, flip, observe
-from pylea.draw import diagram_of
-from pylea.draw.glyph import GlyphKind, Style
-from pylea.draw.layout import _inversions, place
-from pylea.draw.sketch import display_name, sketch_of
-from pylea.examples import simple
+from pylea.draw import coordinates, diagram_of
+from pylea.draw.glyph import GlyphKind, Style, glyph_of
+from pylea.draw.layout import _Layered, _inversions, _longest_path_ranks, _order, _ranks, place
+from pylea.draw.sketch import _accepted_groups, display_name, segments, sketch_of
+from pylea.examples import bioassay, electoral_college, percolation, simple
 from pylea.examples.disease import has_disease, test as disease_test
+from pylea.ir.body import BodyBuilder
+from pylea.ir.prim import Prim
+from pylea.ir.program import Program
+
+DECISIVE = electoral_college.decisive("A", {"A": 1, "B": 2, "C": 3, "D": 4}, quota=6)
 
 MODELS = [simple.empty_dpp, simple.identity_dpp, simple.unused_input_dpp,
           simple.unused_output_dpp, simple.two_outputs_dpp, simple.dpp_with_observe,
           simple.tree_structured_fault_tree_larger, simple.color_random_then_match,
-          disease_test, has_disease]
+          disease_test, has_disease, DECISIVE]
 
 
 def sketches():
@@ -225,9 +231,10 @@ def test_saving_writes_the_same_markup_the_diagram_reports(tmp_path):
 
 
 def test_a_notebook_is_offered_the_picture_and_a_summary():
-    bundle = diagram_of(has_disease.program())._repr_mimebundle_()
+    diagram = diagram_of(has_disease.program())
+    bundle = diagram._repr_mimebundle_()
     assert bundle["image/svg+xml"].startswith("<svg")
-    assert bundle["text/plain"].startswith("<diagram")
+    assert bundle["text/plain"] == repr(diagram)
 
 
 def test_an_unnamed_callee_is_labelled_by_its_index():
@@ -256,16 +263,188 @@ def test_crossings_are_counted_as_out_of_order_pairs(values, expected):
 
 def test_a_source_is_placed_below_the_operation_that_first_reads_it():
     """A coin pinned to the bottom rank would stretch every wire leaving it."""
-    @DPP
-    def late(a: Bool, b: Bool) -> Bool:
-        deep = a & b
-        return deep & flip(0.5)
-
+    late = _late()
     sketch = sketch_of(late.program())
     placement = place(sketch)
     flip_at = next(i for i, n in enumerate(sketch.nodes) if n.kind is GlyphKind.FLIP)
     inputs = [i for i, n in enumerate(sketch.nodes) if n.wire in late.program().main.inputs]
     assert placement.y[flip_at] > max(placement.y[i] for i in inputs)
+
+
+def _span(sketch, rank) -> int:
+    """The total number of ranks the wires of `sketch` rise by under `rank`."""
+    return sum(rank[e.dst] - rank[e.src] for e in sketch.edges)
+
+
+def _least_span_and_lowest_ranking(sketch):
+    """The least total span of any ranking of `sketch` and the lowest ranking of that span,
+    by two linear programs: the least span, then the least sum of ranks with the span
+    bounded by it.  Each output marker has a rank of its own, equal to the top rank, and
+    the top rank is above every node whose wires all end at output markers."""
+    import numpy as np
+    from scipy.optimize import linprog
+    from scipy.sparse import coo_matrix, vstack
+
+    n = len(sketch.nodes)
+    succs = [[] for _ in range(n)]
+    for e in sketch.edges:
+        succs[e.src].append(e.dst)
+    outs = [i for i, node in enumerate(sketch.nodes)
+            if node.kind is GlyphKind.BOUNDARY and not succs[i]]
+    ins = [i for i, node in enumerate(sketch.nodes)
+           if node.kind is GlyphKind.BOUNDARY and succs[i]]
+    top = n
+    rises = [(e.src, e.dst) for e in sketch.edges]
+    if outs:
+        rises += [(v, top) for v in range(n)
+                  if v not in outs and all(s in outs for s in succs[v])]
+    if not rises:
+        return 0, [0] * n
+
+    def matrix(pairs, signs):
+        rows = [k for k in range(len(pairs)) for _ in range(2)]
+        cols = [v for pair in pairs for v in pair]
+        return coo_matrix((signs * len(pairs), (rows, cols)), shape=(len(pairs), n + 1))
+
+    a_ub, b_ub = matrix(rises, [1.0, -1.0]), -np.ones(len(rises))
+    a_eq = matrix([(i, top) for i in outs], [1.0, -1.0]) if outs else None
+    b_eq = np.zeros(len(outs)) if outs else None
+    bounds = [(0, 0) if i in ins else (0, None) for i in range(n + 1)]
+    span = np.zeros(n + 1)
+    for e in sketch.edges:
+        span[e.dst] += 1
+        span[e.src] -= 1
+
+    first = linprog(span, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds)
+    if first.status != 0:           # HiGHS's presolve fails some of these in scipy 1.13
+        first = linprog(span, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds,
+                        options={"presolve": False})
+    least = round(first.fun)
+    second = linprog(np.ones(n + 1), A_ub=vstack([a_ub, coo_matrix(span)]),
+                     b_ub=np.append(b_ub, least), A_eq=a_eq, b_eq=b_eq, bounds=bounds)
+    return least, np.round(second.x[:n]).astype(int).tolist()
+
+
+def test_the_ranking_uses_as_few_dummy_nodes_as_any_ranking_can():
+    for name, sketch in _layout_corpus():
+        least, _ = _least_span_and_lowest_ranking(sketch)
+        assert _span(sketch, _ranks(sketch)) == least, name
+
+
+def test_the_ranking_is_the_lowest_of_those_with_the_fewest_dummy_nodes():
+    for name, sketch in _layout_corpus():
+        _, lowest = _least_span_and_lowest_ranking(sketch)
+        assert _ranks(sketch) == lowest, name
+
+
+def test_the_ranking_does_not_depend_on_the_order_the_wires_are_listed_in():
+    from dataclasses import replace
+
+    for name, sketch in _layout_corpus():
+        edges = list(sketch.edges)
+        random.Random(name).shuffle(edges)
+        assert _ranks(replace(sketch, edges=tuple(edges))) == _ranks(sketch), name
+
+
+def _early_output():
+    """A definition whose output is computed before the observation that ends it."""
+    @DPP
+    def early() -> Bool:
+        x = flip(0.5)
+        observe(~x | flip(0.3))
+        return x
+
+    return "early", sketch_of(early.program())
+
+
+def test_an_output_computed_early_ends_above_every_other_node():
+    for name, sketch in [_early_output(), *_layout_corpus()]:
+        rank = _ranks(sketch)
+        leaves = {e.src for e in sketch.edges}
+        outs = {i for i, node in enumerate(sketch.nodes)
+                if node.kind is GlyphKind.BOUNDARY and i not in leaves}
+        assert len({rank[i] for i in outs}) == 1, name
+        assert all(rank[i] < rank[min(outs)] for i in range(len(rank)) if i not in outs), name
+
+
+def _wires_through_boxes(sketch, placement) -> list[tuple[int, int]]:
+    """The pairs of a wire and a box it does not end at, where a straight run of the wire
+    crosses the middle line of the box inside it."""
+    from bisect import bisect_left, bisect_right
+
+    boxes = sorted((placement.y[i], i) for i, node in enumerate(sketch.nodes)
+                   if node.kind not in (GlyphKind.DOT, GlyphKind.BOUNDARY))
+    heights = [y for y, _ in boxes]
+    found = []
+    for k, (e, wire) in enumerate(zip(sketch.edges, placement.routes)):
+        for (x0, y0), (x1, y1) in zip(wire.points, wire.points[1:]):
+            low, high = min(y0, y1), max(y0, y1)
+            for y, i in boxes[bisect_right(heights, low):bisect_left(heights, high)]:
+                if i in (e.src, e.dst):
+                    continue
+                x = x0 + (x1 - x0) * (y - y0) / (y1 - y0)
+                if abs(x - placement.x[i]) < placement.glyphs[i].width / 2 - 1e-6:
+                    found.append((k, i))
+    return found
+
+
+def test_no_wire_passes_through_a_box():
+    for name, sketch in [_early_output(), *_layout_corpus()]:
+        assert not _wires_through_boxes(sketch, place(sketch)), name
+
+
+def test_a_running_total_has_dummies_in_proportion_to_its_steps():
+    """Each step's comparison is ranked next to the step, rather than at the bottom with a
+    wire rising from it through the whole picture."""
+    from pylea import Enum
+
+    class Colour(Enum):
+        elements = ["R", "G", "B", "Y"]
+
+    @DPP
+    def running_total() -> Bool:
+        total = flip(0.5)
+        for _ in range(50):
+            total = total ^ (Colour.random({"R": 0.1, "G": 0.2, "B": 0.3, "Y": 0.4}) == "R")
+        return total
+
+    sketch = running_total.diagram().sketch
+    assert _span(sketch, _ranks(sketch)) <= 2 * len(sketch.edges)
+
+
+def _late():
+    """A definition whose coin flip is read only by its last gate."""
+    @DPP
+    def late(a: Bool, b: Bool) -> Bool:
+        deep = a & b
+        return deep & flip(0.5)
+
+    return late
+
+
+@pytest.mark.parametrize("answer", ["no solution", "a solution breaking a constraint"])
+def test_a_ranking_the_solver_does_not_find_is_the_longest_path_ranking(monkeypatch, answer):
+    import numpy as np
+    import scipy.optimize
+
+    solve, calls = scipy.optimize.linprog, []
+
+    def failing(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        calls.append(result)
+        if answer == "no solution":
+            result.status = 2
+        elif len(calls) == 2:
+            result.x = np.zeros_like(result.x)
+        return result
+
+    sketch = sketch_of(_late().program())
+    assert _ranks(sketch) != _longest_path_ranks(sketch)
+    monkeypatch.setattr(scipy.optimize, "linprog", failing)
+    assert _ranks(sketch) == _longest_path_ranks(sketch)
+    # A failed first solve is tried once more without presolve before the fallback.
+    assert len(calls) == 2
+    assert len(place(sketch).routes) == len(sketch.edges)
 
 
 def _long_wires(model):
@@ -465,6 +644,27 @@ def test_a_figure_compiles(tmp_path, picture):
     assert (tmp_path / "figure.pdf").exists()
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(shutil.which("lualatex") is None, reason="no LuaLaTeX")
+def test_a_figure_with_a_label_outside_latin_1_compiles_under_lualatex(tmp_path):
+    import os
+
+    source = diagram_of(has_disease.program(), title="名前").save(tmp_path / "figure.tex")
+    # A font cache of its own, so that the test needs no writable cache of the user's.
+    env = {**os.environ, "TEXMFVAR": str(tmp_path / "texmf-var")}
+    finished = subprocess.run(
+        ["lualatex", "-interaction=nonstopmode", "-halt-on-error", source.name],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300, env=env)
+    assert finished.returncode == 0, finished.stdout[-2000:]
+    assert (tmp_path / "figure.pdf").exists()
+
+
+def test_a_wide_character_counts_as_two_columns():
+    style = Style()
+    assert style.text_width("名前") == style.text_width("ab") * 2
+    assert style.text_width("é") == style.text_width("e")
+
+
 def test_an_output_wire_is_labelled_with_what_the_model_returned():
     from pylea.examples.sprinkler import sprinkler_network
 
@@ -503,10 +703,15 @@ def test_a_call_taking_variables_of_several_bits_has_one_port_per_variable():
 
 def test_a_variable_whose_bits_are_read_separately_is_drawn_as_bit_dots():
     """A `match` selects on single bits, so one dot would misdraw the selections."""
-    from pylea.examples.simple import color_random_then_match
+    from pylea.examples.simple import Color
 
-    sketch = color_random_then_match.diagram().sketch
-    body = color_random_then_match.program().main
+    @DPP
+    def selected() -> Bool:
+        c = Color.random({"R": 0.5, "G": 0.25, "B": 0.25})
+        return c.match({"R": flip(0.9), "G": flip(0.5), "B": flip(0.1)})
+
+    sketch = selected.diagram().sketch
+    body = selected.program().main
     assert len([n for n in sketch.nodes if n.wire is not None]) == len(body.bits)
 
 
@@ -524,6 +729,130 @@ def test_a_returned_variable_drawn_as_bit_dots_labels_each_bit_by_position():
 
     svg = leaky.diagram().svg()
     assert ">shade[0]<" in svg and ">shade[1]<" in svg
+
+
+def _accepted_by_definition(b, candidates, in_segments, out_segments, joined):
+    """The rule of `_accepted_groups`, read directly: every candidate group checked
+    against every list of wires on its own."""
+    groups, taken = [], set()
+    for g in map(tuple, candidates):
+        if len(g) < 2 or len(set(g)) != len(g):
+            continue
+        if any(w in taken for w in g) or not all(0 <= w < len(b.bits) for w in g):
+            continue
+        groups.append(g)
+        taken.update(g)
+
+    apart = {j for ops in joined for j in ops}
+    lists = ([b.inputs, b.outputs]
+             + [ws for j, op in enumerate(b.ops) if j not in apart for ws in (op.args, op.outs)]
+             + [tuple(w for j in ops for w in b.ops[j].outs) for ops in joined])
+
+    def together(g):
+        for ws in lists:
+            i = 0
+            while i < len(ws):
+                if ws[i] in g:
+                    if tuple(ws[i:i + len(g)]) != g:
+                        return False
+                    i += len(g)
+                else:
+                    i += 1
+        return True
+
+    accepted = {g for g in groups if together(g)}
+    changed = True
+    while changed:
+        changed = False
+        for segment in in_segments + out_segments:
+            if len(segment) < 2 or segment in accepted:
+                continue
+            for g in [g for g in accepted if set(segment) & set(g)]:
+                accepted.discard(g)
+                changed = True
+    return [g for g in groups if g in accepted]
+
+
+def _random_grouping(seed: int):
+    """A definition of tables over runs of earlier results, with candidate groups, interface
+    segments and tuples of joined assignments, all drawn at random from seed `seed`."""
+    import numpy as np
+
+    rng = random.Random(seed)
+    b = BodyBuilder()
+    inputs = [b.fresh() for _ in range(rng.randint(0, 5))]
+    runs, pool = [tuple(inputs)] if inputs else [], list(inputs)
+    for _ in range(rng.randint(2, 20)):
+        if pool and rng.random() < 0.5:
+            run = rng.choice(runs)
+            start = rng.randrange(len(run))
+            args = run[start:start + rng.randint(1, 3)]
+        else:
+            args = tuple(rng.choice(pool) for _ in range(rng.randint(0, min(3, len(pool)))))
+        n_out = rng.randint(1, 3)
+        table = np.full((2 ** n_out, 2 ** len(args)), 1 / 2 ** n_out)
+        outs = b.emit(Prim.from_matrix(table), args)
+        runs.append(outs)
+        pool += outs
+    outputs = [w for run in rng.sample(runs, min(3, len(runs))) for w in run]
+    body = b.finish(tuple(inputs), tuple(outputs))
+
+    candidates = [run for run in runs if len(run) > 1 and rng.random() < 0.8]
+    candidates += [tuple(rng.sample(pool, 2)) for _ in range(rng.randint(0, 3))]
+    candidates += [(pool[0], pool[0]), (len(body.bits), pool[0])]
+    rng.shuffle(candidates)
+
+    def widths(wires):
+        cut, left = [], len(wires)
+        while left:
+            cut.append(rng.randint(1, left))
+            left -= cut[-1]
+        return cut
+
+    ops = list(range(len(body.ops)))
+    rng.shuffle(ops)
+    joined = [tuple(sorted(ops[k:k + 2])) for k in range(0, min(4, len(ops) - 1), 2)]
+    return (body, candidates, segments(body.inputs, widths(body.inputs), "input"),
+            segments(body.outputs, widths(body.outputs), "output"), joined)
+
+
+def test_grouping_accepts_the_groups_the_definition_describes():
+    for seed in range(300):
+        body, candidates, ins, outs, joined = _random_grouping(seed)
+        assert (_accepted_groups(body, candidates, ins, outs, joined)
+                == _accepted_by_definition(body, candidates, ins, outs, joined)), seed
+
+
+class _Counted(tuple):
+    """A tuple counting the entries read from it, over every instance."""
+
+    reads = 0
+
+    def __getitem__(self, key):
+        found = super().__getitem__(key)
+        _Counted.reads += len(found) if isinstance(key, slice) else 1
+        return found
+
+    def __iter__(self):
+        for value in super().__iter__():
+            _Counted.reads += 1
+            yield value
+
+
+def test_grouping_reads_each_list_of_wires_a_bounded_number_of_times():
+    """One assignment returning 2,000 pairs and another reading them all: checking each
+    pair against both lists on its own would read four million entries."""
+    from types import SimpleNamespace
+
+    pairs = [(2 * k, 2 * k + 1) for k in range(2000)]
+    wires = _Counted(range(4000))
+    body = SimpleNamespace(bits=[1] * 4000, inputs=_Counted(), outputs=wires,
+                           ops=[SimpleNamespace(args=_Counted(), outs=wires),
+                                SimpleNamespace(args=wires, outs=_Counted())])
+    _Counted.reads = 0
+    accepted = _accepted_groups(body, pairs, [], [(w,) for w in range(4000)])
+    assert accepted == pairs
+    assert _Counted.reads <= 2 * 3 * len(wires)
 
 
 # --- vertical spacing ---------------------------------------------------------------
@@ -635,6 +964,19 @@ def test_the_colours_follow_the_reader_only_where_the_page_does(theme, expected)
     assert ("prefers-color-scheme" in svg) is expected
 
 
+@pytest.mark.parametrize("theme", ["auto", "light", "dark"])
+def test_the_picture_carries_its_own_background(theme):
+    """Without it the ink of one theme can land on the page of the other."""
+    svg = has_disease.diagram().svg(theme)
+    root = ElementTree.fromstring(svg)
+    drawn = [child for child in root if not child.tag.endswith("style")]
+    paper = drawn[0]
+    assert paper.tag.endswith("rect") and paper.attrib["class"] == "paper"
+    box = [float(v) for v in root.attrib["viewBox"].split()]
+    assert [float(paper.attrib[k]) for k in ("x", "y", "width", "height")] == box
+    assert ".pylea .paper{fill:var(--paper)" in svg
+
+
 def test_a_fixed_theme_picks_the_colours_it_names():
     assert "#16181d" in has_disease.diagram().svg("light")
     assert "#e6e8ec" in has_disease.diagram().svg("dark")
@@ -643,3 +985,165 @@ def test_a_fixed_theme_picks_the_colours_it_names():
 def test_a_theme_neither_backend_knows_is_refused():
     with pytest.raises(ValueError, match="'auto', 'light' or 'dark'"):
         has_disease.diagram().svg("sepia")
+
+
+def _random_gates(seed: int) -> Program:
+    """A definition of 5 to 60 coin flips and gates over up to four inputs, returning
+    three of its variables."""
+    rng = random.Random(seed)
+    b = BodyBuilder()
+    inputs = [b.fresh() for _ in range(rng.randint(0, 4))]
+    pool = inputs + list(b.emit(Prim.flip(0.5), ()))
+    for _ in range(rng.randint(5, 60)):
+        r = rng.random()
+        if r < 0.15:
+            pool += b.emit(Prim.flip(round(rng.random(), 2) or 0.5), ())
+        elif r < 0.85:
+            gate = Prim.and_() if r < 0.5 else Prim.or_()
+            pool += b.emit(gate, (rng.choice(pool), rng.choice(pool)))
+        else:
+            pool += b.emit(Prim.not_(), (rng.choice(pool),))
+    return Program((b.finish(tuple(inputs), tuple(rng.sample(pool, 3))),), 0)
+
+
+def _layered(sketch, style):
+    glyphs = tuple(glyph_of(n.kind, n.label, n.n_in, n.n_out, style) for n in sketch.nodes)
+    g = _Layered(sketch, _ranks(sketch), glyphs, style)
+    _order(g, None)
+    return g
+
+
+def _too_close(g, x, style) -> list[tuple[int, int]]:
+    """The neighbours on a rank of `g`, dummies included, closer than their separation."""
+    return [(a, b) for nodes in g.layers.values() for a, b in zip(nodes, nodes[1:])
+            if x[b] - x[a] < coordinates._separation(g, a, b, style) - 1e-6]
+
+
+def _layout_corpus():
+    yield from ((f"seed {seed}", sketch_of(_random_gates(seed))) for seed in range(200))
+    for name, dpp in (("decisive", DECISIVE),
+                      ("pivotal Wyoming", electoral_college.pivotal("Wyoming")),
+                      ("wet stones", percolation.wet_stones(10, 40, 0.5))):
+        yield name, dpp.diagram().sketch
+
+
+def test_neighbours_on_a_rank_are_never_closer_than_their_separation():
+    style = Style()
+    for name, sketch in _layout_corpus():
+        g = _layered(sketch, style)
+        assert not _too_close(g, coordinates.coordinates(g, style), style), name
+
+
+def test_each_compaction_pass_keeps_the_separation():
+    style = Style()
+    for name, sketch in _layout_corpus():
+        g = _layered(sketch, style)
+        conflicted = coordinates._crossed_by_a_short_wire(g)
+        for upward in (False, True):
+            for rightward in (False, True):
+                x = coordinates._one_pass(g, style, conflicted, upward, rightward)
+                assert not _too_close(g, x, style), (name, upward, rightward)
+
+
+def test_the_electoral_college_diagram_has_no_overlapping_boxes():
+    diagram = DECISIVE.diagram()
+    p, nodes = diagram.placement, diagram.sketch.nodes
+    boxes = [i for i, n in enumerate(nodes)
+             if n.kind not in (GlyphKind.DOT, GlyphKind.BOUNDARY)]
+    for a in boxes:
+        for b in boxes:
+            ga, gb = p.glyphs[a], p.glyphs[b]
+            if a < b:
+                apart_x = abs(p.x[a] - p.x[b]) >= (ga.width + gb.width) / 2
+                apart_y = abs(p.y[a] - p.y[b]) >= (ga.height + gb.height) / 2
+                assert apart_x or apart_y, (nodes[a].label, nodes[b].label)
+
+
+def _passes(sketch, style):
+    g = _layered(sketch, style)
+    conflicted = coordinates._crossed_by_a_short_wire(g)
+    return g, [(rightward, coordinates._one_pass(g, style, conflicted, upward, rightward))
+               for upward in (False, True) for rightward in (False, True)]
+
+
+def test_the_median_layout_is_kept_where_the_passes_are_about_equally_wide():
+    """Each box then sits centred over what it reads, rather than to one side of it."""
+    style = Style()
+    g, passes = _passes(bioassay.lethal_dose.diagram().sketch, style)
+    widths = [max(x) - min(x) for _, x in passes]
+    narrowest = passes[widths.index(min(widths))][1]
+    x = coordinates.coordinates(g, style)
+    assert x != narrowest and max(x) - min(x) <= 3 * min(widths)
+
+
+def test_one_narrow_pass_among_wide_ones_is_used_alone():
+    """A long running total is a column in one pass and a staircase in the others."""
+    style = Style()
+    sketch = electoral_college.pivotal("Wyoming").diagram().sketch
+    g, passes = _passes(sketch, style)
+    widths = sorted(max(x) - min(x) for _, x in passes)
+    assert widths[1] > 3 * widths[0]
+    assert place(sketch, style).width < 1000
+
+
+def test_showing_without_a_browser_says_where_the_file_is(monkeypatch):
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", lambda *args, **kwargs: False)
+    with pytest.raises(RuntimeError, match=r"written to .*\.svg") as raised:
+        has_disease.diagram().show()
+    path = str(raised.value).split("written to ")[1]
+    assert open(path, encoding="utf-8").read().startswith("<svg")
+
+
+def test_a_call_is_labelled_with_the_name_it_was_called_by_at_its_site():
+    """Two callees with equal bodies are one body, which one name cannot label."""
+    prog = has_disease.program()
+    calls = [j for j, op in enumerate(prog.main.ops) if not isinstance(op.callee, Prim)]
+    labels = [n.label for n in sketch_of(prog, body_names={0: "sensor_a"},
+                                         op_names={calls[1]: "sensor_b"}).nodes
+              if n.op in calls]
+    assert labels == ["sensor_a", "sensor_b"]
+
+
+def _bit_by_bit(value: int, bits: int) -> Program:
+    """A definition returning `value` as `bits` one-bit constants, most significant first."""
+    b = BodyBuilder()
+    outs = [b.emit(Prim.const((value >> (bits - 1 - i)) & 1, 1), ())[0] for i in range(bits)]
+    return Program((b.finish((), tuple(outs)),), 0)
+
+
+def test_a_constant_recorded_bit_by_bit_by_one_call_is_one_box_with_its_value():
+    prog = _bit_by_bit(1000, 12)
+    everything = tuple(range(12))
+    sketch = sketch_of(prog, wire_groups=[everything], output_widths=(12,),
+                       op_groups=[everything])
+    boxes = [n for n in sketch.nodes if n.op is not None]
+    assert [(n.label, n.n_out) for n in boxes] == [("1000", 1)]
+    assert len([n for n in sketch.nodes if n.kind is GlyphKind.DOT]) == 1
+
+
+def test_constants_not_recorded_by_one_call_stay_separate_boxes():
+    """A pair of two separate one-bit constants is the same body as a two-bit constant
+    recorded bit by bit."""
+    sketch = sketch_of(_bit_by_bit(3, 2), wire_groups=[(0, 1)], output_widths=(2,))
+    assert [n.label for n in sketch.nodes if n.op is not None] == ["1", "1"]
+
+
+def test_a_wide_constant_is_drawn_as_one_box():
+    from pylea import UInt
+
+    class Narrow(UInt):
+        width = 8
+
+    class Wide(UInt):
+        width = 12
+
+    def boxes(data_type):
+        @DPP
+        def constant() -> data_type:
+            return data_type.const(200)
+
+        return [n.label for n in constant.diagram().sketch.nodes if n.op is not None]
+
+    assert boxes(Wide) == boxes(Narrow) == ["200"]

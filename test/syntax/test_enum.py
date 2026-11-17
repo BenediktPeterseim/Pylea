@@ -173,3 +173,255 @@ def test_a_draw_followed_by_a_match_stays_non_negative():
     assert np.all(M >= -1e-10)
 
 
+
+
+# --- `elements`, checked when the class is created ---
+
+def test_elements_with_a_repeated_value_are_refused_when_the_class_is_created():
+    with pytest.raises(ValueError, match=r"elements\[0\] = 'a' and .*elements\[2\] = 'a'"):
+        class Repeated(Enum):
+            elements = ["a", "b", "a"]
+
+
+@pytest.mark.parametrize("elements", [[1, True], [0, False], [1, 1.0]])
+def test_elements_equal_in_python_such_as_1_and_true_are_refused(elements):
+    with pytest.raises(ValueError, match="in Python"):
+        type("Twice", (Enum,), {"elements": elements})
+
+
+@pytest.mark.parametrize("make", [
+    lambda: {"low", "mid", "high"},
+    lambda: frozenset({"low", "mid", "high"}),
+    lambda: {"low": 0, "mid": 1}.keys(),
+    lambda: (x for x in ["low", "mid", "high"]),
+])
+def test_elements_given_as_a_set_or_a_generator_are_refused(make):
+    with pytest.raises(TypeError, match="order"):
+        class Unordered(Enum):
+            elements = make()
+
+
+def test_elements_given_as_a_string_are_refused():
+    with pytest.raises(TypeError, match="string"):
+        class Letters(Enum):
+            elements = "RGB"
+
+
+def test_empty_elements_are_refused_when_the_class_is_created():
+    with pytest.raises(ValueError, match="empty"):
+        class Empty(Enum):
+            elements = []
+
+
+def test_unhashable_elements_are_refused_when_the_class_is_created():
+    with pytest.raises(TypeError, match=r"\[1, 2\]"):
+        class Lists(Enum):
+            elements = [[1, 2], [3]]
+
+
+def test_an_element_not_equal_to_itself_is_refused():
+    with pytest.raises(ValueError, match="nan"):
+        class WithNan(Enum):
+            elements = [0.0, float("nan")]
+
+
+def test_elements_given_as_a_range_tuple_or_numpy_array_keep_their_order():
+    class FromRange(Enum):
+        elements = range(3, 0, -1)
+
+    class FromTuple(Enum):
+        elements = ("c", "a", "b")
+
+    class FromArray(Enum):
+        elements = np.array([2.5, 0.5, 1.5])
+
+    class FromIntArray(Enum):
+        elements = np.arange(3)
+
+    assert FromRange.elements == (3, 2, 1)
+    assert FromTuple.elements == ("c", "a", "b")
+    assert FromArray.elements == (2.5, 0.5, 1.5)
+    assert all(type(e) is float for e in FromArray.elements)
+    assert all(type(e) is int for e in FromIntArray.elements)
+    assert FromTuple.encoding().decoded() == {0: "c", 1: "a", 2: "b"}
+
+
+def test_a_subclass_inherits_the_elements_of_its_parent():
+    class Parent(Enum):
+        elements = ["x", "y", "z"]
+
+    class Child(Parent):
+        pass
+
+    assert Child.elements == ("x", "y", "z")
+    assert Child.encoding().decoded() == Parent.encoding().decoded()
+
+
+def test_an_abstract_enum_raises_not_implemented_error_wherever_it_is_used():
+    from pylea import DPP, Bool
+
+    class Abstract(Enum):
+        pass
+
+    with pytest.raises(NotImplementedError, match="declares no elements"):
+        @DPP
+        def drawn() -> Bool:
+            Abstract.random({})
+            return Bool.const(True)
+    with pytest.raises(NotImplementedError, match="declares no elements"):
+        @DPP
+        def uniform() -> Bool:
+            Abstract.uniform()
+            return Bool.const(True)
+    with pytest.raises(NotImplementedError, match="declares no elements"):
+        Abstract.cpt([], {(): [1.0]})
+    with pytest.raises(NotImplementedError, match="declares no elements"):
+        Abstract.encoding()
+
+
+# --- weights of `random` ---
+
+def test_a_weight_for_a_value_that_is_not_an_element_is_refused():
+    from pylea import DPP
+
+    with pytest.raises(ValueError, match="'Purple' is not an element of Color"):
+        @DPP
+        def misspelt() -> Color:
+            return Color.random({"R": 0.5, "Purple": 0.5})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_weight_is_refused(bad):
+    from pylea import DPP
+
+    with pytest.raises(ValueError, match="not finite"):
+        @DPP
+        def drawn() -> Color:
+            return Color.random({"R": bad, "G": 0.5})
+    with pytest.raises(ValueError, match="not finite"):
+        Color.cpt([Coin], {("H",): [0.5, 0.5, 0.0], ("T",): [bad, 0.5, 0.0]})
+
+
+def test_a_random_draw_given_a_list_reads_it_in_element_order():
+    from pylea import DPP, probability_mass_function
+
+    @DPP
+    def listed() -> Color:
+        return Color.random([2, 1, 1])
+
+    assert probability_mass_function(listed) == pytest.approx({"R": 0.5, "G": 0.25, "B": 0.25})
+
+
+def test_a_list_of_weights_of_the_wrong_length_is_refused_by_random():
+    from pylea import DPP
+
+    with pytest.raises(ValueError, match="needs 3 entries"):
+        @DPP
+        def short() -> Color:
+            return Color.random([0.5, 0.5])
+
+
+# --- `match` ---
+
+class _Grass(Enum):
+    elements = ["dry", "damp", "wet"]
+
+
+class _Colour(Enum):
+    elements = ["R", "G", "B", "Y"]
+
+
+def test_a_match_value_of_another_type_is_refused_even_at_the_same_width():
+    from pylea import DPP, UInt
+
+    class U2(UInt):
+        width = 2
+
+    for other in (lambda: _Colour.const("B"), lambda: U2.const(1)):
+        with pytest.raises(TypeError, match=r"value for 'B' must be a _Grass; got a"):
+            @DPP
+            def mixed() -> _Grass:
+                return Color.uniform().match(
+                    {"R": _Grass.const("dry"), "G": _Grass.uniform(), "B": other()},
+                    data_type=_Grass)
+
+
+def test_a_match_over_variables_of_several_types_asks_for_data_type():
+    from pylea import DPP
+
+    with pytest.raises(TypeError, match="several types"):
+        @DPP
+        def mixed() -> _Grass:
+            return Color.uniform().match(
+                {"R": _Grass.uniform(), "G": _Colour.uniform(), "B": _Grass.uniform()})
+
+
+def test_a_match_key_that_is_not_an_element_is_refused():
+    from pylea import DPP, Bool
+
+    with pytest.raises(ValueError, match="'hail' is not an element of Color"):
+        @DPP
+        def extra() -> Bool:
+            return Color.uniform().match({"R": True, "G": False, "B": False, "hail": True},
+                                         data_type=Bool)
+
+
+def test_a_match_missing_a_key_names_it_even_without_data_type():
+    from pylea import DPP, Bool
+
+    with pytest.raises(ValueError, match="no value for 'B'"):
+        @DPP
+        def missing() -> Bool:
+            return Color.uniform().match({"R": True, "G": False})
+
+
+def test_a_match_over_constants_is_recorded_as_one_table():
+    from pylea import DPP, Bool
+    from pylea.ir.program import op_count
+
+    @DPP
+    def tabulated() -> Bool:
+        return Color.uniform().match({"R": True, "G": False, "B": True}, data_type=Bool)
+
+    assert op_count(tabulated.program()) == 2
+
+
+def test_a_match_over_constants_agrees_with_the_same_match_over_variables():
+    from pylea import DPP
+
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        weights = rng.random(5) + 0.1
+        choice = [_Grass.elements[i] for i in rng.integers(0, 3, size=5)]
+        mapping = dict(zip(Season.elements, choice))
+
+        @DPP
+        def constants() -> _Grass:
+            return Season.random(list(weights)).match(mapping, data_type=_Grass)
+
+        @DPP
+        def variables() -> _Grass:
+            return Season.random(list(weights)).match(
+                {k: _Grass.const(v) for k, v in mapping.items()})
+
+        np.testing.assert_allclose(constants.distribution(), variables.distribution())
+
+
+class Season(Enum):
+    elements = ["spring", "summer", "autumn", "winter", "monsoon"]
+
+
+def test_a_match_over_constants_wider_than_the_dense_bound_uses_the_selection_tree():
+    from pylea import DPP, UInt
+
+    class Wide(UInt):
+        width = 19                          # 2 + 19 bits, beyond a table's 20
+
+    @DPP
+    def chosen() -> Wide:
+        return Color.random([0.5, 0.25, 0.25]).match(
+            {"R": 5, "G": 300_000, "B": (1 << 19) - 1}, data_type=Wide)
+
+    distribution = chosen.distribution()
+    assert distribution[[5, 300_000, (1 << 19) - 1]] == pytest.approx([0.5, 0.25, 0.25])
+    assert distribution.sum() == pytest.approx(1.0)

@@ -4,10 +4,15 @@
 saved, opened in a browser, or shown inline in a notebook.  Colours are two custom
 properties, and by default a dark-scheme override follows the reader's setting.
 
-A page of a fixed colour asks for a fixed `theme` instead.  A file loaded through an ``img``
-element is a document of its own and cannot see the colours of the page holding it, so it
-would follow the reader's setting while the page did not, and a light diagram would land on
-a light page.
+The picture paints its own background, a rectangle in the paper colour filling the whole
+``viewBox``, so the ink always lies on paper of the same theme: on a page of another
+colour, in a file opened on its own, and in a notebook whose theme differs from the
+reader's setting.
+
+A page of a fixed colour asks for a fixed `theme`, so that the picture's background
+matches it.  A file loaded through an ``img`` element is a document of its own and cannot
+see the colours of the page holding it, so under ``"auto"`` it follows the reader's
+setting while the page does not.
 
 Wires are drawn before glyphs, and a glyph's outline is filled with the background, so a
 wire passing behind a box is hidden by it.  A wire, an arrow head and a glyph outline are
@@ -22,7 +27,7 @@ is set.
 """
 from __future__ import annotations
 
-from pylea.draw.glyph import Style
+from pylea.draw.glyph import Style, number_text
 from pylea.draw.layout import Placement
 from pylea.draw.sketch import Sketch
 
@@ -34,6 +39,7 @@ _DARK = "--ink:#e6e8ec;--paper:#1b1d22"
 _STYLE = """\
 .pylea{{{palette}}}
 {override}
+.pylea .paper{{fill:var(--paper);stroke:none}}
 .pylea .wire{{fill:none;stroke:var(--ink);stroke-width:{stroke}}}
 .pylea .outline{{fill:var(--paper);stroke:var(--ink);stroke-width:{stroke};\
 stroke-linejoin:round}}
@@ -43,21 +49,13 @@ dominant-baseline:central}}\
 """
 
 
-def _n(value: float) -> str:
-    """`value` rounded to a hundredth, without a trailing zero."""
-    return f"{round(value, 2):g}"
-
-
-
-
-
 def _shape(path, x: float, y: float, flip) -> str:
     """One glyph outline, moved to `(x, y)` and turned the right way up."""
     out = []
     for seg in path:
         head, rest = seg[0], seg[1:]
         pairs = [(x + rest[i], flip(y + rest[i + 1])) for i in range(0, len(rest), 2)]
-        out.append(head + " ".join(f"{_n(px)} {_n(py)}" for px, py in pairs))
+        out.append(head + " ".join(f"{number_text(px)} {number_text(py)}" for px, py in pairs))
     return "".join(out)
 
 
@@ -67,7 +65,7 @@ def to_svg(sketch: Sketch, placement: Placement, style: Style | None = None,
 
     `theme` is ``"auto"`` to follow the reader's setting, or ``"light"`` or ``"dark"`` to
     fix the colours, which is what a page of a fixed colour needs.  Any other value raises
-    `ValueError`.
+    `ValueError`.  The background is drawn in either case.
     """
     style = style or Style()
     if theme not in ("auto", "light", "dark"):
@@ -86,10 +84,13 @@ def to_svg(sketch: Sketch, placement: Placement, style: Style | None = None,
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" class="pylea" '
-        f'viewBox="{_n(-over)} 0 {_n(width + 2 * over)} {_n(height + band)}" '
-        f'width="{_n((width + 2 * over) * style.scale)}" '
-        f'height="{_n((height + band) * style.scale)}">',
+        f'viewBox="{number_text(-over)} 0 {number_text(width + 2 * over)} '
+        f'{number_text(height + band)}" '
+        f'width="{number_text((width + 2 * over) * style.scale)}" '
+        f'height="{number_text((height + band) * style.scale)}">',
         f"<style>{_STYLE.format(stroke=1.1, font=_FONT, **_palette(theme))}</style>",
+        f'<rect class="paper" x="{number_text(-over)}" y="0" '
+        f'width="{number_text(width + 2 * over)}" height="{number_text(height + band)}"/>',
     ]
 
     wires = "".join(f'<path class="wire" d="{_shape(wire.path, 0.0, 0.0, flip)}"/>'
@@ -106,14 +107,16 @@ def to_svg(sketch: Sketch, placement: Placement, style: Style | None = None,
         drawn = [f'<path class="{"solid" if shape.solid else "outline"}" '
                  f'd="{_shape(shape.path, x, y, flip)}"/>'
                  for shape in glyph.shapes]
-        drawn += [f'<text x="{_n(x + label.x)}" y="{_n(flip(y + label.y))}" '
-                  f'font-size="{_n(label.size)}">{_escape(label.text)}</text>'
+        drawn += [f'<text x="{number_text(x + label.x)}" '
+                  f'y="{number_text(flip(y + label.y))}" '
+                  f'font-size="{number_text(label.size)}">{_escape(label.text)}</text>'
                   for label in glyph.labels]
         parts.append("".join(drawn))
 
     if sketch.title:
-        parts.append(f'<text x="{_n(width / 2)}" y="{_n(height + band / 2)}" '
-                     f'font-size="{_n(style.font_size * 1.15)}">'
+        parts.append(f'<text x="{number_text(width / 2)}" '
+                     f'y="{number_text(height + band / 2)}" '
+                     f'font-size="{number_text(style.font_size * 1.15)}">'
                      f"{_escape(sketch.title)}</text>")
 
     parts.append("</svg>")

@@ -11,9 +11,14 @@ sweep.  Deleting a gate that equals one of its arguments leaves every implicatio
 the remaining wires in place, so the later gates of the sweep are rewritten against the
 same relation.
 
+The relation of a body over `n` literals takes ``n * n / 8`` bytes, and computing it takes
+time growing faster than ``n * n``: each round of `pylea.simplify.implication` reads the
+whole relation, and the rounds go on until one changes nothing.  A body whose relation
+would take more than `pylea.simplify.implication.MAX_RELATION_BYTES` gets none, and on it
+`absorb` deletes only the gates reading one wire twice.
+
 `idempotence` is the one instance that needs no relation, a gate reading one wire twice,
-for a caller that wants it without the cost of the relation, which grows with the square
-of the body.
+for a caller that wants it without the cost of the relation.
 """
 from __future__ import annotations
 
@@ -29,9 +34,8 @@ def absorb(prog: Program, deadline: float | None = None) -> Program:
     """`prog` with every gate that equals one of its arguments by implication deleted.
 
     `deadline` is a `time.perf_counter` reading past which no further body is started and
-    the relation of the current one is no longer extended.  The relation of a body takes
-    ``n * n / 8`` bytes for its `n` literals, taken as it is computed, so a deadline bounds
-    the memory along with the time; without one, the whole relation is held.
+    the relation of the current one is no longer extended.  The memory the relation takes
+    is bounded with or without a deadline, as the module docstring says.
 
         >>> from pylea.ir.body import BodyBuilder
         >>> from pylea.ir.prim import Prim

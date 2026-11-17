@@ -4,8 +4,9 @@
 its wires and summing the product of the ops' matrix entries at those values.  A called body
 is resolved to its own matrix first and then treated as a leaf.
 
-The cost is exponential in the number of wires, so this applies to small DPPs only and
-raises `TooLarge` beyond `max_wires`.  Everything the compiler does is checked against it.
+A body whose wires are ``n`` bits wide in total has ``2**n`` combinations of values, so this
+applies to small DPPs only and raises `TooLarge` beyond `max_bits`.  Everything the compiler
+does is checked against it.
 """
 from __future__ import annotations
 
@@ -16,14 +17,15 @@ from pylea.ir.program import Program
 
 
 class TooLarge(ValueError):
-    """Raised when a body has more wires than `max_wires`."""
+    """Raised when the wires of a body are more than `max_bits` bits wide in total."""
 
 
-def semantics(prog: Program, body: int | None = None, max_wires: int = 22) -> np.ndarray:
+def semantics(prog: Program, body: int | None = None, max_bits: int = 22) -> np.ndarray:
     """The semantics of `body`, or of the root, as a ``(2**out_bits, 2**in_bits)`` matrix.
 
-    Raises `TooLarge` where the body has more than `max_wires` wires, the enumeration being
-    over all ``2**n`` combinations of their values.
+    Raises `TooLarge` where the wires of the body, or of a body it calls, are more than
+    `max_bits` bits wide in total, the enumeration being over all ``2**n`` combinations of
+    the values of ``n`` bits.
 
         >>> from pylea import DPP, Bool, flip
         >>> @DPP
@@ -33,10 +35,10 @@ def semantics(prog: Program, body: int | None = None, max_wires: int = 22) -> np
         [[0.875], [0.125]]
     """
     b = prog.bodies[prog.root if body is None else body]
-    n = len(b.bits)
-    if n > max_wires:
-        raise TooLarge(f"{n} wires is {2 ** n} combinations of values; "
-                       "raise max_wires deliberately")
+    n = sum(b.bits)
+    if n > max_bits:
+        raise TooLarge(f"{n} bits of wires is {2 ** n} combinations of values; "
+                       "raise max_bits deliberately")
 
     # A called body is itself a matrix, so resolve callees first and treat them as leaves.
     matrices: list[np.ndarray] = []
@@ -44,9 +46,9 @@ def semantics(prog: Program, body: int | None = None, max_wires: int = 22) -> np
         if isinstance(op.callee, Prim):
             matrices.append(op.callee.matrix)
         else:
-            matrices.append(semantics(prog, op.callee, max_wires))
+            matrices.append(semantics(prog, op.callee, max_bits))
 
-    widths = [b.bits[w] for w in range(n)]
+    widths = list(b.bits)
     out = np.zeros((1 << _bits(b, b.outputs), 1 << _bits(b, b.inputs)))
 
     for assignment in range(1 << sum(widths)):

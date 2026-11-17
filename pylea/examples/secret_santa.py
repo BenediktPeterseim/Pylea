@@ -6,8 +6,8 @@ includes couples, someone drawing their own partner's.  `valid_draw` is the prob
 one draw, made uniformly at random and without replacement, needs no do-over.
 
     >>> from pylea import prob
-    >>> round(prob(valid_draw(n_couples=2, n_singles=1)), 6)
-    0.133333
+    >>> round(prob(valid_draw(n_couples=1, n_singles=2)), 6)
+    0.166667
 
 A family of ten, four couples and two singles, is past what the exact engine reaches within
 minutes.  Each person's own forbidden names do not depend on how many other people are

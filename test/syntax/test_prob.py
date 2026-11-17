@@ -60,3 +60,33 @@ def test_prob_rejects_a_dpp_with_inputs():
 def test_prob_rejects_a_dpp_with_several_outputs():
     with pytest.raises(ValueError, match="no input"):
         prob(two_outputs_dpp)  # type: ignore[arg-type]
+
+
+def _queries():
+    from pylea import expectation, probability_mass_function
+    return [prob, expectation, probability_mass_function]
+
+
+@pytest.mark.parametrize("query", _queries(), ids=lambda q: q.__name__)
+def test_a_query_of_an_undecorated_function_names_the_missing_decorator(query):
+    def coin() -> Bool:
+        return flip(0.5)
+
+    with pytest.raises(TypeError, match="coin is a function not decorated with @DPP"):
+        query(coin)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("query", _queries(), ids=lambda q: q.__name__)
+def test_a_query_of_a_table_says_to_call_it_inside_a_dpp(query):
+    import numpy as np
+    from pylea import LikelihoodTable
+
+    table = LikelihoodTable((), (Bool,), np.array([[0.5], [0.5]]))
+    with pytest.raises(TypeError, match="Call the table inside a DPP"):
+        query(table)  # type: ignore[arg-type]
+
+
+def test_the_refusal_of_a_dpp_that_is_not_an_event_names_what_it_takes_and_returns():
+    with pytest.raises(ValueError, match="'two_inputs_dpp' takes Bool, Bool and returns "
+                                         "Bool"):
+        prob(two_inputs_dpp)  # type: ignore[arg-type]

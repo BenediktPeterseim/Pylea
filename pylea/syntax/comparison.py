@@ -1,8 +1,10 @@
 """Comparator circuits.
 
-Each is an ordinary DPP over ``2n`` Boolean wires and is linear in `n`: equality conjoins
+Each is an ordinary DPP over ``2n`` Boolean inputs and is linear in `n`: equality conjoins
 the bitwise agreements, and less-than accumulates the first position at which the two differ
-in the right direction, guarded by agreement above it.
+in the right direction, guarded by agreement above it.  A comparison is a circuit rather than
+a matrix because its matrix would have ``2 x 2**(2n)`` entries, where the circuit has a
+number of assignments linear in `n`.
 
 `pylea.syntax.variable` wraps one in a `pylea.syntax.dpp.Primitive` that retypes the
 interface to two n-bit variables and keeps the circuit; use the operators on a variable
@@ -46,6 +48,15 @@ def make_less_than_comparator(n: int):
     """The `DPP` deciding whether the first of two n-bit values is below the second.
 
     Use `<` on a `pylea.syntax.variable.Variable` instead; this is what that builds.
+
+        >>> from pylea import DPP, Bool, Enum, prob
+        >>> class Colour(Enum):
+        ...     elements = ["R", "G", "B"]
+        >>> @DPP
+        ... def before_blue() -> Bool:
+        ...     return Colour.uniform() < "B"
+        >>> round(prob(before_blue), 6)
+        0.666667
     """
 
     @DPP

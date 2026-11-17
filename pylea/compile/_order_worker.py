@@ -1,37 +1,40 @@
-"""Subprocess worker running one bounded `pylea.compile.order.AdaptiveOrderFinder` search.
+"""Subprocess worker running one bounded contraction tree search, for all the networks of
+a DPP together.
 
-An `AdaptiveOrderFinder` with a `max_time` runs its search here, so that the search can be
-stopped at that bound: cotengra tests its own budget only between trials, and on a wide
-enough network a single trial runs far beyond it.  The protocol is one pickled request on
-stdin, ``((optimize, escalate_cost, max_time), (indices, output, size, kappa))``, and one
-pickled response on stdout, ``{"order": order}`` or ``{"error": message}``.  The finder's
-settings travel rather than the finder itself, so a subclass defined anywhere still runs.
+A `pylea.compile.order.BoundedOrderFinder`, and an `AdaptiveOrderFinder` with a
+`max_time`, run their search here, so that the search can be stopped at its bound:
+cotengra tests its own budget only between trials, and on a wide enough network a single
+trial runs far beyond it.  The protocol is one pickled request on stdin,
+``(kind, settings, networks, kappa)`` with `networks` a list of
+``(indices, output, size)``, and one pickled response on stdout,
+``{"orders": orders, "starved": starved}`` or ``{"error": message}``; the work is
+`pylea.compile.order.search_all`.  The finder's settings travel, and the worker builds
+the finder of the kind named in the request from them, so a subclass's own `find` does
+not run in the worker.  The warnings of cotengra that `pylea.compile.order` hides are
+hidden here and in the processes its search starts.
 
-The worker is run by `pylea.compile._process_tree.ProcessTree`.  It starts no process
-before it has read the request, which is what lets the tree stop every process the search
-starts, and once it has read it, the end of its standard input stops it, since the parent
-keeps that open while it waits.
+The worker is served by `pylea.compile._process_tree.serve` and run by
+`pylea.compile._process_tree.ProcessTree`.  It starts no process before it has read the
+request, which is what lets the tree stop every process the search starts, and once it has
+read it, the end of its standard input stops it, since the parent keeps that open while it
+waits.
 """
 from __future__ import annotations
 
-import pickle
-import sys
+
+def _handle(request) -> dict:
+    from pylea.compile.order import hide_cotengra_warnings, search_all
+
+    kind, settings, networks, kappa = request
+    hide_cotengra_warnings()
+    orders, starved = search_all(kind, settings, networks, kappa)
+    return {"orders": orders, "starved": starved}
 
 
 def main() -> None:
-    from pylea.compile._process_tree import exit_with_parent
-    from pylea.compile.order import AdaptiveOrderFinder
+    from pylea.compile._process_tree import serve
 
-    (optimize, escalate_cost, max_time), (indices, output, size, kappa) = pickle.load(
-        sys.stdin.buffer)
-    exit_with_parent()
-    finder = AdaptiveOrderFinder(optimize, escalate_cost, max_time)
-    try:
-        response = {"order": finder.find_here(indices, output, size, kappa=kappa)}
-    except Exception as exc:                    # noqa: BLE001, reported to the parent
-        response = {"error": f"{type(exc).__name__}: {exc}"}
-    pickle.dump(response, sys.stdout.buffer)
-    sys.stdout.buffer.flush()
+    serve(_handle)
 
 
 if __name__ == "__main__":

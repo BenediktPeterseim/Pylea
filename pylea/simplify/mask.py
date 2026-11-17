@@ -16,13 +16,18 @@ what follows from one literal.
 
 Each rewrite deletes a gate and renames its result to its other argument, or replaces a
 gate by a constant over its result alone; nothing moves, which is what lets `x` be any
-wire at all.  Flip lifting, in `pylea.simplify.lift`, remains for the reads of a coin flip
+wire at all.  Lifting, in `pylea.simplify.lift`, remains for the reads of a coin flip
 that no masking removes, where forcing the dominator needs every one of them.
 
 `mask` works through the wires read more than once, dropping as many of their reads as
 the remaining ones keep masked, one pass per body until none can be dropped.  What one
 value of a wire decides is propagated once for all of the wire's readers, and only as far
 as their tests need; a dropped read is taken out of it rather than propagated afresh.
+
+The test of each read searches upwards from its gate, and the search may cover the whole
+body, so a pass takes time up to the number of reads tested times the size of the body.
+This grows with the square of the size of a body most of whose wires are read more than
+once.  Only a deadline bounds it; `pylea.simplify.driver` gives measured times.
 """
 from __future__ import annotations
 

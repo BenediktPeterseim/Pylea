@@ -1,4 +1,4 @@
-"""One small model per construction of the language.
+"""One small DPP per construction of the language.
 
 Between them these cover Boolean gates, sharing and redundancy, unused inputs and outputs,
 conditioning, several inputs and outputs, and every `pylea.syntax.enum.Enum` construction
@@ -153,7 +153,7 @@ def two_input_output_dpp(x: Bool, y: Bool) -> tuple[Bool, Bool]:
     return u | v, u & v
 
 
-# The same model, with its input types given by the `types` keyword argument.
+# The same DPP, with its input types given by the `types` keyword argument.
 @DPP
 def two_input_output_dpp_type_tuple(x, types=(Bool, Bool)):
     a = flip(0.5)
@@ -255,7 +255,7 @@ def season_random() -> Season:
 
 @DPP
 def color_unused_input(unused: Color) -> Bool:
-    # A two-bit input read by nothing, so its wires are summed out.
+    # A two-bit input read by nothing, so its bits are summed out.
     return flip(0.3)
 
 
@@ -282,7 +282,7 @@ def direction_to_coin(x: Direction) -> Coin:
 
 @DPP
 def color_two_matches(x: Color) -> tuple[Bool, Coin]:
-    # One two-bit input branched on twice, so its wires have several readers.
+    # One two-bit input branched on twice, so each of its bits is read several times.
     b = x.match({"R": True, "G": False, "B": False}, data_type=Bool)
     c = x.match({"R": "H", "G": "T", "B": "H"}, data_type=Coin)
     return b, c

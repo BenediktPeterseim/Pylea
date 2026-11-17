@@ -118,3 +118,25 @@ def test_a_body_with_inputs_needs_an_explicit_pattern_and_refuses_the_packed_ker
     assert abs(byte_lane.run(4096, np.random.default_rng(0)).counts[1] / 4096 - 0.9) < 0.03
     with pytest.raises(NotPackable):
         PackedProgram(byte_lane)
+
+
+def test_a_sampled_dpp_and_its_programs_are_freed_once_unreferenced():
+    import gc
+    import weakref
+
+    from pylea import DPP, Bool, flip, prob
+    from pylea.sample.query import prepared
+
+    @DPP
+    def coin() -> Bool:
+        return flip(0.3) & flip(0.5)
+
+    prob(coin, method="smc", rel_err=0.2, seed=0)
+    program = weakref.ref(prepared(coin)[0])
+    assert program().packed is not None          # the packed form was built and is held
+    del coin
+    # The first collection frees the DPP and its cache entry, the second the program and
+    # its packed form, which refer to each other.
+    gc.collect()
+    gc.collect()
+    assert program() is None

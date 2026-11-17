@@ -10,7 +10,12 @@ on:
     types: [published]
 
 jobs:
+  # Every job of the tests workflow; a release whose tests fail is not built.
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

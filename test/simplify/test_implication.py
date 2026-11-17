@@ -115,6 +115,30 @@ def test_a_deadline_already_passed_allocates_no_relation():
     assert rel.rows.size == 0
 
 
+
+def _or_of_two_inputs() -> tuple[Body, int, int, int]:
+    b = BodyBuilder()
+    x, y = b.fresh(), b.fresh()
+    (o,) = b.emit(Prim.or_(), (x, y))
+    return b.finish((x, y), (o,)), x, y, o
+
+
+@pytest.mark.parametrize("deadline", [None, float("inf")])
+def test_a_body_beyond_the_memory_bound_gets_no_relation_with_or_without_a_deadline(
+        deadline, monkeypatch):
+    body, x, _y, o = _or_of_two_inputs()
+    monkeypatch.setattr("pylea.simplify.implication.MAX_RELATION_BYTES", 2)
+    rel = Implications(body, deadline=deadline)
+    assert not rel.complete and rel.n == 0 and rel.rows.size == 0
+    assert rel.implies(pos(x), pos(x)) and not rel.implies(pos(x), pos(o))
+
+
+def test_a_body_at_the_memory_bound_gets_its_whole_relation(monkeypatch):
+    body, x, _y, o = _or_of_two_inputs()
+    monkeypatch.setattr("pylea.simplify.implication.MAX_RELATION_BYTES", 3)  # 3 rows of 1 byte
+    rel = Implications(body)
+    assert rel.complete and rel.n == 3 and rel.implies(pos(x), pos(o))
+
 @pytest.mark.parametrize("seed", range(40))
 def test_a_relation_stopped_at_any_reading_of_the_clock_holds_only_implications(
         seed, monkeypatch):

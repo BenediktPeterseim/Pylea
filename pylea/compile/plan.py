@@ -17,9 +17,8 @@ that sum, and being linear they may be applied to the sum rather than to each sl
 """
 from __future__ import annotations
 
-from math import prod
-
 from dataclasses import dataclass
+from math import prod
 
 from pylea.compile.network import Leaf
 
@@ -106,6 +105,20 @@ class Contract:
 Step = Load | Select | Reduce | Diagonal | Spread | Transpose | Contract
 
 
+def operands(step: Step) -> tuple[int, ...]:
+    """The values `step` reads.
+
+        >>> operands(Load(0)), operands(Transpose(3, (1, 0))), operands(
+        ...     Contract(1, 2, (0,), (0,), 1, 2, 1, 2))
+        ((), (3,), (1, 2))
+    """
+    if isinstance(step, Load):
+        return ()
+    if isinstance(step, Contract):
+        return (step.a, step.b)
+    return (step.src,)
+
+
 @dataclass(frozen=True, slots=True)
 class Plan:
     """Steps in SSA form, together with where the slice sum ends.
@@ -128,10 +141,8 @@ class Plan:
 
     @property
     def n_slices(self) -> int:
-        n = 1
-        for d in self.sliced_dims:
-            n *= d
-        return n
+        """The number of slices, the product of `sliced_dims`; 1 where nothing is sliced."""
+        return prod(self.sliced_dims)
 
     def peak_entries(self) -> int:
         """The largest number of array entries a single value holds.

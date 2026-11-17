@@ -34,7 +34,7 @@ import numpy as np
 
 from pylea.ir.prim import Prim, is_indicator, is_stochastic
 from pylea.syntax.dpp import Primitive, ProbabilisticCallable
-from pylea.syntax.variable import DataType
+from pylea.syntax.variable import DataType, require_variable_type
 
 def normalised_distribution(array: np.ndarray) -> np.ndarray:
     """The flat normalised distribution of an evaluator result's array.
@@ -57,28 +57,34 @@ def normalised_distribution(array: np.ndarray) -> np.ndarray:
 def scaled_matrix(array: np.ndarray, log_scale: float) -> np.ndarray:
     """``array * exp(log_scale)`` as a float64 array.
 
-    Raises `ValueError` where the product does not fit float64: where the factor itself
-    overflows or underflows, or where a positive entry would become zero or infinite.
-    Every consumer that folds an evaluator's log scale back into an array goes through
-    this one criterion.
+    Raises `ValueError` where the product does not fit float64 to full precision: where a
+    positive entry would become infinite, zero, or smaller than the smallest normal
+    float64, which keeps fewer digits.  An entry already that small in `array` is left as
+    it is.  Every consumer that folds an evaluator's log scale back into an array goes
+    through this one criterion.
 
         >>> scaled_matrix(np.array([[0.5]]), 0.0).tolist()
         [[0.5]]
         >>> scaled_matrix(np.array([[1.0]]), -1000.0)
         Traceback (most recent call last):
           ...
-        ValueError: the matrix's magnitude (e**-1000.0) does not fit float64; use matrix(), which returns the array and its log scale apart.
+        ValueError: the matrix's magnitude (e**-1000.0) does not fit float64 to full precision; use matrix(), which returns the array and its log scale apart.
     """
     matrix = np.asarray(array, dtype=float)
     if log_scale == 0.0:
         return matrix
-    factor = np.exp(log_scale)
-    scaled = matrix * factor
-    if (not 0.0 < factor < np.inf or np.isinf(scaled).any()
+    # Two factors, each a normal number where `log_scale` allows, so that no factor
+    # loses digits by itself being subnormal.
+    half = log_scale / 2.0
+    with np.errstate(over="ignore", under="ignore"):
+        scaled = matrix * np.exp(half) * np.exp(log_scale - half)
+    tiny = np.finfo(float).tiny
+    if (np.isinf(scaled).any()
+            or bool(((matrix >= tiny) & (scaled < tiny)).any())
             or bool(((matrix > 0.0) & (scaled == 0.0)).any())):
         raise ValueError(
-            f"the matrix's magnitude (e**{log_scale:.1f}) does not fit float64; "
-            "use matrix(), which returns the array and its log scale apart.")
+            f"the matrix's magnitude (e**{log_scale:.1f}) does not fit float64 to full "
+            "precision; use matrix(), which returns the array and its log scale apart.")
     return scaled
 
 
@@ -97,6 +103,18 @@ def scaled_table(input_types, output_types, array: np.ndarray,
 
 
 _next_table_key: int = 0
+
+
+def _type_tuple(types, what: str) -> tuple[DataType, ...]:
+    """`types` as a tuple, or `TypeError` unless it is a tuple or list of variable types."""
+    if isinstance(types, type):
+        raise TypeError(f"{what} must be a tuple of types; for one type write "
+                        f"({types.__name__},)")
+    if not isinstance(types, (tuple, list)):
+        raise TypeError(f"{what} must be a tuple of types; got a {type(types).__name__}")
+    for i, t in enumerate(types):
+        require_variable_type(t, f"{what}[{i}]")
+    return tuple(types)
 
 
 def _fresh_table_key() -> int:
@@ -122,8 +140,11 @@ class LikelihoodTable(ProbabilisticCallable):
         >>> round(prob(received), 6)
         0.45
 
-    Raises `ValueError` where `matrix` is negative anywhere, or where its shape disagrees
-    with the bit widths the declared types imply.
+    The matrix is held densely, ``2**(in_bits + out_bits)`` entries for the bits the
+    types declare.  Raises `ValueError` where `matrix` is negative or not finite anywhere,
+    or where its shape disagrees with the bit widths the declared types imply, and
+    `TypeError` where `input_types` or `output_types` is not a tuple or list of variable
+    types.
     """
 
     def __init__(
@@ -132,6 +153,8 @@ class LikelihoodTable(ProbabilisticCallable):
             output_types: tuple[DataType, ...],
             matrix: np.ndarray,
         ) -> None:
+        input_types = _type_tuple(input_types, "input_types")
+        output_types = _type_tuple(output_types, "output_types")
         matrix = np.ascontiguousarray(matrix, dtype=float)
         in_bits = sum(t.nbits() for t in input_types)
         out_bits = sum(t.nbits() for t in output_types)
@@ -139,19 +162,41 @@ class LikelihoodTable(ProbabilisticCallable):
             raise ValueError(
                 f"types declare {in_bits} input and {out_bits} output bits, so the matrix "
                 f"must be {1 << out_bits} x {1 << in_bits}; got {matrix.shape}")
+        if not np.isfinite(matrix).all():
+            raise ValueError("a likelihood table must have finite entries")
         if matrix.size and matrix.min() < 0.0:
             raise ValueError("a likelihood table must be non-negative")
         matrix.flags.writeable = False
-        self._input_types = tuple(input_types)
-        self._output_types = tuple(output_types)
+        self._input_types = input_types
+        self._output_types = output_types
         self.matrix = matrix
         self._compiled: Primitive | None = None
 
     def input_types(self) -> tuple[DataType, ...]:
+        """The types of the inputs, whose bits index the columns, MSB first."""
         return self._input_types
 
     def output_types(self) -> tuple[DataType, ...]:
+        """The types of the outputs, whose bits index the rows, MSB first."""
         return self._output_types
+
+    def name(self) -> str:
+        """What a message or a diagram calls a call of this table."""
+        return "likelihood table"
+
+    def __repr__(self) -> str:
+        """The types and the shape of the matrix.
+
+            >>> from pylea import Bool
+            >>> LikelihoodTable((Bool,), (Bool, Bool), np.full((4, 2), 0.25))
+            <LikelihoodTable (Bool,) -> (Bool, Bool), 4 x 2>
+        """
+        def shown(types) -> str:
+            names = ", ".join(t.__name__ for t in types)
+            return f"({names},)" if len(types) == 1 else f"({names})"
+        rows, columns = self.matrix.shape
+        return (f"<LikelihoodTable {shown(self._input_types)} -> "
+                f"{shown(self._output_types)}, {rows} x {columns}>")
 
     @property
     def probabilities(self) -> np.ndarray:
@@ -184,22 +229,27 @@ class LikelihoodTable(ProbabilisticCallable):
             >>> round(float(t.matrix.sum()), 4), round(float(t.normalised().matrix.sum()), 4)
             (0.75, 1.0)
 
-
-        The difference tells when the table is called inside another DPP.  This table
-        treats the DPP it came from as an independent draw from its conditional, where the
-        unnormalised one additionally weights each input by the probability, on that input,
-        that every observed value is true.  Normalising
-        turns "draw uniformly from 1 to 40, then keep only draws at most `n`" into "draw
-        uniformly from 1 to `n`".
+        Called inside another DPP, the two tables differ.  The unnormalised table keeps the
+        observations of the DPP it came from, weighting each input by the probability, on
+        that input, that every observed value is true.  The normalised table draws from the
+        conditional distribution on each input and conditions on nothing.  For example,
+        "draw uniformly from 1 to 40, then observe that the draw is at most `n`" becomes
+        "draw uniformly from 1 to `n`".  Call the unnormalised table where the
+        observations are part of the model, and the normalised one where only the
+        conditional distribution is wanted.
         """
         return LikelihoodTable(self._input_types, self._output_types, self.probabilities)
 
     @property
     def is_deterministic(self) -> bool:
+        """Whether every column is 0/1 with at most one 1, so that the table is a function
+        on the inputs it admits, a zero column being an input it excludes."""
         return is_indicator(self.matrix)
 
     @property
     def is_discardable(self) -> bool:
+        """Whether every column sums to 1, so that a call whose outputs are never read
+        changes nothing and may be left out."""
         return is_stochastic(self.matrix)
 
     def compiled(self) -> Primitive:
@@ -225,6 +275,7 @@ class LikelihoodTable(ProbabilisticCallable):
                 output_types=self._output_types,
                 name=f"_TABLE_{_fresh_table_key()}_",
                 prim=Prim.from_matrix(self.matrix),
+                label=self.name(),
             )
         return self._compiled
 
@@ -232,7 +283,7 @@ class LikelihoodTable(ProbabilisticCallable):
         return self.compiled()(*args)
 
     def __str__(self) -> str:
-        """The normalised weights, with bit patterns decoded to the declared types\' values.
+        """The normalised weights, with bit patterns decoded to the declared types' values.
 
         Rows are inputs and columns are outputs.  A pattern decoding to no value is left
         out, which happens for a type whose element count is not a power of two.

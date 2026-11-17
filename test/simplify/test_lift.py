@@ -1,4 +1,4 @@
-"""Flip lifting, and the conditions it declines under."""
+"""Lifting of coin flips, and the conditions it declines under."""
 import sys
 from time import perf_counter
 

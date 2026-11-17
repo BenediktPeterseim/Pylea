@@ -13,7 +13,7 @@ import pytest
 from pylea.compile.lower import compile_program
 from pylea.compile.order import GreedyOrderFinder
 from pylea.eval.backend import NumpyBackend, TorchBackend, select, worth_a_device
-from pylea.eval.interp import evaluate, underflowed
+from pylea.eval.interp import evaluate, evaluate_certified
 from pylea.ir.body import BodyBuilder
 from pylea.ir.prim import Prim
 from pylea.ir.program import Program, intern
@@ -130,22 +130,30 @@ def test_float32_reaches_far_below_its_own_smallest_normal(n):
     assert _p_true(_and_chain(n), backend) == pytest.approx(0.25 ** n, rel=1e-4)
 
 
-def test_float32_underflows_where_no_scale_can_help_and_reports_it():
-    """``0.25**80`` sits beside an entry of about 1, and no shared scale holds both.
-
-    A silent zero on a positive probability is the worst failure this evaluator has, so both
-    halves are pinned: that float32 gives zero here, and that `underflowed` sees it.
-    """
-    backend = _torch_backend("mps")
+def test_a_float32_result_that_cannot_be_certified_is_recomputed_in_float64():
+    """``0.25**80`` sits beside an entry of about 1, and no shared scale holds both in
+    float32; the certificate sees it and float64 answers."""
+    torch = pytest.importorskip("torch")
+    backend = TorchBackend("cpu", dtype=torch.float32)
     plans, root = compile_program(_and_chain(80), GreedyOrderFinder(), kappa=28)
-    array, _scale = evaluate(plans, root, backend=backend)
-    assert underflowed(array)
-    assert _p_true(_and_chain(80), NumpyBackend()) == pytest.approx(0.25 ** 80, rel=1e-6)
+    result = evaluate_certified(plans, root, backend)
+    assert result.path == "float64"
+    p = float(result.array.reshape(-1)[-1] * np.exp(result.log_scale))
+    assert p == pytest.approx(0.25 ** 80, rel=1e-12)
 
 
-def test_a_healthy_result_is_not_flagged():
+def test_a_healthy_result_is_not_recomputed():
     plans, root = compile_program(_and_chain(20), GreedyOrderFinder(), kappa=28)
-    assert not underflowed(evaluate(plans, root, backend=NumpyBackend())[0])
+    assert evaluate_certified(plans, root, NumpyBackend()).path == "backend"
+
+
+def test_torch_on_the_cpu_agrees_with_numpy_on_extreme_probabilities():
+    torch = pytest.importorskip("torch")
+    for dtype in (torch.float64, torch.float32):
+        backend = TorchBackend("cpu", dtype=dtype)
+        for n in (20, 80, 300):
+            want = _p_true(_and_chain(n), NumpyBackend())
+            assert _p_true(_and_chain(n), backend) == pytest.approx(want, rel=1e-6)
 
 
 # ------------------------------------------------------------ device selection
@@ -167,3 +175,22 @@ def test_a_step_count_past_the_float_range_stays_on_the_cpu():
 def test_no_device_is_chosen_without_plan_statistics():
     """`select()` knowing nothing must not silently narrow every evaluation to float32."""
     assert isinstance(select(), NumpyBackend)
+
+
+def test_a_torch_device_without_torch_raises_an_error_naming_the_extra(monkeypatch):
+    import sys
+
+    from pylea.eval.backend import select
+
+    monkeypatch.setitem(sys.modules, "torch", None)       # makes `import torch` fail
+    with pytest.raises(ImportError, match=r"pylea\[gpu\]"):
+        select("cpu")
+    assert type(select("numpy")).__name__ == "NumpyBackend"
+
+
+def test_a_device_name_torch_does_not_accept_is_refused_with_the_accepted_names():
+    pytest.importorskip("torch")
+    from pylea.eval.backend import select
+
+    with pytest.raises(ValueError, match="'numpy', or a torch device such as 'cpu'"):
+        select("gpu")

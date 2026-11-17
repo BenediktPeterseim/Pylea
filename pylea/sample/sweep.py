@@ -58,13 +58,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 
 from pylea.ir.body import Body, Op
 from pylea.ir.prim import Prim, Tag
 from pylea.ir.program import Program
-from pylea.sample.cost_model import ESS_FRACTION
+from pylea.sample.cost_model import ESS_FRACTION, RESAMPLE_VECTORISED_MAX
 
 # Step kinds of the preprocessed op list.
 _FLIP, _AND, _OR, _NOT, _OBSERVE, _CONST, _UNIFORM, _COLUMN, _FREE = range(9)
@@ -265,6 +266,17 @@ class SweepProgram:
         (True, True)
     """
 
+    @cached_property
+    def packed(self):
+        """The `pylea.sample.packed.PackedProgram` running this program, built on first
+        use, or `None` where the program does not admit one."""
+        from pylea.sample.packed import NotPackable, PackedProgram
+
+        try:
+            return PackedProgram(self)
+        except NotPackable:
+            return None
+
     def __init__(self, body: Body, input_pattern: int | None = None):
         if body.inputs and input_pattern is None:
             raise ValueError(
@@ -281,7 +293,8 @@ class SweepProgram:
         self.log_scale = 0.0
         self._binary = True
         self._inputs = _input_values(body, input_pattern or 0)
-        self._steps, self.n_stages = self._preprocess(prims)
+        steps, self.n_stages = self._preprocess(prims)
+        self._steps = tuple(steps)
         self.binary_weights = self._binary
         self.peak_planes = self._peak_planes()
 
@@ -290,7 +303,11 @@ class SweepProgram:
         """Whether any op can change a particle's weight."""
         return self.n_stages > 0
 
-    # -- preprocessing --------------------------------------------------------------
+    @property
+    def steps(self) -> tuple:
+        """The preprocessed op list the executors run, one tuple per step, its first
+        entry the step kind."""
+        return self._steps
 
     def _preprocess(self, prims: list[Prim]):
         body = self.body
@@ -402,8 +419,6 @@ class SweepProgram:
                 live += len(step[4])
             peak = max(peak, live)
         return peak
-
-    # -- execution ------------------------------------------------------------------
 
     def run(self, n: int, rng: np.random.Generator, *, resample: bool = False,
             squares: bool = False, record_stages: bool = False) -> BatchResult:
@@ -524,10 +539,8 @@ class SweepProgram:
                 if triggered.any():
                     hit = np.flatnonzero(triggered)
                     log_z[hit] += np.log(totals[hit] / n)
-                    if n <= 128:
-                        # Vectorised multinomial over all triggered blocks at once: the
-                        # n-squared inversion is cheap at sweep sizes, where a per-block
-                        # generator call would dominate the whole step.
+                    if n <= RESAMPLE_VECTORISED_MAX:
+                        # Vectorised multinomial over all triggered blocks at once.
                         cdf = np.cumsum(by_block[hit] / totals[hit, None], axis=1)
                         u = rng.random((hit.size, n))
                         drawn = np.minimum((cdf[:, None, :] <= u[:, :, None]).sum(axis=2),

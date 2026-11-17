@@ -46,6 +46,7 @@ class Op:
 
     @property
     def is_call(self) -> bool:
+        """Whether `callee` is a body rather than a primitive."""
         return not isinstance(self.callee, Prim)
 
 
@@ -60,14 +61,18 @@ class Body:
 
     @property
     def n_wires(self) -> int:
+        """The number of wires, ``len(bits)``."""
         return len(self.bits)
 
     @property
     def in_bits(self) -> int:
+        """The total width of the input positions."""
         return sum(self.bits[w] for w in self.inputs)
 
     @property
     def out_bits(self) -> int:
+        """The total width of the output positions, an output naming a wire twice counting
+        twice."""
         return sum(self.bits[w] for w in self.outputs)
 
     @property
@@ -166,6 +171,9 @@ class BodyBuilder:
         Raises `ArityError` if `args` does not match `callee`'s arity or wire widths.
         """
         args = tuple(args)
+        if not isinstance(callee, Prim) and not 0 <= callee < len(self._bodies):
+            raise ArityError(f"body {callee} does not exist; {len(self._bodies)} are "
+                             "recorded")
         in_w, out_w = signature(callee, self._bodies)
         if len(args) != len(in_w):
             raise ArityError(f"{_name(callee)} takes {len(in_w)} argument(s); got {len(args)}")

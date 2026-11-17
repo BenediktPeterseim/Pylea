@@ -3,28 +3,31 @@
 The portfolio algorithm's hedge runs the exact lane in a fresh process so that it can be
 killed the moment the sampling lane certifies, or the moment a deadline passes; a worker
 thread would instead hold the interpreter lock through the Python-heavy order search and
-starve the sampler.  The protocol is one pickled request on stdin, the triple ``(mode,
-program, compile_kwargs)`` with `program` a `pylea.ir.program.Program`, and one pickled
-response on stdout.  Mode ``"evaluate"`` compiles with the full ladder and evaluates,
-responding with `array` and `scale` as `pylea.syntax.compiled.Compiled.matrix` returns
-them, plus `trace`; mode ``"predict"`` compiles a greedy unsimplified plan and responds with
-`predicted_ms`, so the portfolio algorithm can budget the predictor by killing this
-process.  Any failure becomes an `error` string.  Pickling the traced `Program` rather than
-re-importing the DPP keeps the worker independent of where the DPP was defined.
+starve the sampler.  The protocol is one pickled request on stdin, ``(mode, program,
+compile_kwargs, name)`` with `program` a `pylea.ir.program.Program` and `name` the DPP's
+name, for messages, and one pickled response on stdout.  Mode ``"evaluate"`` compiles with
+the full ladder and evaluates, responding with `array` and `scale` as
+`pylea.syntax.compiled.Compiled.matrix` returns them, plus `trace`; mode ``"predict"``
+compiles a greedy unsimplified plan and responds with `predicted_ms`, so the portfolio
+algorithm can budget the predictor by killing this process.  Any failure becomes an `error`
+string; a refusal, `pylea.compile.lower.ExactInferenceInfeasible`, also carries the
+exception itself under `infeasible`, so that the caller raises it as it is and the
+portfolio algorithm can tell a refusal from a failure.  Pickling the traced `Program`
+rather than re-importing the DPP keeps the worker independent of where the DPP was
+defined.
 
-The worker is run by `pylea.compile._process_tree.ProcessTree`, so that killing it also
-kills the processes it started: the order search of the planner's last stage, and the
-processes that search starts.  It starts no process before it has read the request, and
-once it has read it, the end of its standard input stops it, since the parent keeps that
-open while it waits.
+The worker is served by `pylea.compile._process_tree.serve`, which reads the request
+inside its error handling, so a request that cannot be read, such as one naming a class
+the worker cannot import, is answered with an `error` string too.  It is run by
+`pylea.compile._process_tree.ProcessTree`, so that killing it also kills the processes it
+started: the order search of the planner's last stage, and the processes that search
+starts.  It starts no process before it has read the request, and once it has read it, the
+end of its standard input stops it, since the parent keeps that open while it waits.
 """
 from __future__ import annotations
 
-import pickle
-import sys
 
-
-def evaluate_program(program, compile_kwargs: dict):
+def evaluate_program(program, compile_kwargs: dict, name: str | None = None):
     """`program`'s root matrix and log scale, through the same `planned`,
     `chosen_backend` and `evaluated_matrix` pipeline `Compiled` evaluates with."""
     from pylea.syntax.compiled import (
@@ -34,9 +37,9 @@ def evaluate_program(program, compile_kwargs: dict):
     _program, plans, root, trace = planned(
         program, compile_kwargs.get("order_finder"),
         compile_kwargs.get("kappa", DEFAULT_KAPPA),
-        compile_kwargs.get("simplify", True))
+        compile_kwargs.get("simplify", True), name)
     backend = chosen_backend(plans, compile_kwargs.get("device"))
-    array, scale, _underflowed = evaluated_matrix(plans, root, backend)
+    array, scale, _path = evaluated_matrix(plans, root, backend)
     return array, scale, trace
 
 
@@ -56,32 +59,39 @@ def probe_compile_kwargs(compile_kwargs: dict) -> dict:
             "kappa": compile_kwargs.get("kappa", DEFAULT_KAPPA)}
 
 
-def predict_program(program, compile_kwargs: dict) -> float:
-    """The greedy unsimplified plan's predicted evaluation cost, in milliseconds."""
+def predict_program(program, compile_kwargs: dict, name: str | None = None) -> float:
+    """The greedy unsimplified plan's predicted evaluation cost, in milliseconds.
+
+    Raises `pylea.compile.lower.ExactInferenceTooLarge` where the DPP exceeds the size
+    limit of the query's `kappa`.
+    """
     from pylea.compile.cost import predicted_ms
     from pylea.syntax.compiled import planned
 
     options = probe_compile_kwargs(compile_kwargs)
     _program, plans, _root, _trace = planned(
-        program, options["order_finder"], options["kappa"], options["simplify"])
+        program, options["order_finder"], options["kappa"], options["simplify"], name)
     return predicted_ms(plans)
 
 
-def main() -> None:
-    from pylea.compile._process_tree import exit_with_parent
+def _handle(request) -> dict:
+    from pylea.compile._process_tree import error_response
+    from pylea.compile.lower import ExactInferenceInfeasible
 
-    mode, program, compile_kwargs = pickle.load(sys.stdin.buffer)
-    exit_with_parent()
+    mode, program, compile_kwargs, name = request
     try:
         if mode == "predict":
-            response = {"predicted_ms": predict_program(program, compile_kwargs)}
-        else:
-            array, scale, trace = evaluate_program(program, compile_kwargs)
-            response = {"array": array, "scale": scale, "trace": trace}
-    except Exception as exc:                    # noqa: BLE001, reported to the parent
-        response = {"error": f"{type(exc).__name__}: {exc}"}
-    pickle.dump(response, sys.stdout.buffer)
-    sys.stdout.buffer.flush()
+            return {"predicted_ms": predict_program(program, compile_kwargs, name)}
+        array, scale, trace = evaluate_program(program, compile_kwargs, name)
+    except ExactInferenceInfeasible as exc:
+        return {**error_response(exc), "infeasible": exc}
+    return {"array": array, "scale": scale, "trace": trace}
+
+
+def main() -> None:
+    from pylea.compile._process_tree import serve
+
+    serve(_handle)
 
 
 if __name__ == "__main__":

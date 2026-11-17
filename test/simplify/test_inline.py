@@ -1,6 +1,7 @@
 """Inlining of a body called once, and the refusal of every other body."""
 import numpy as np
 
+import pylea.ir.inline as ir_inline
 from pylea.ir.body import Body, BodyBuilder, prune_wires
 from pylea.ir.inline import inline_all
 from pylea.ir.prim import Prim
@@ -108,3 +109,77 @@ def test_the_depth_family_is_refused_at_every_level():
         bodies.append(b.finish((), (r,)))
     program = Program(tuple(bodies), len(bodies) - 1)
     assert inline(program) == program
+
+
+def _count_rebuilds(monkeypatch) -> list[int]:
+    """A list that grows by one entry per body `pylea.ir.inline` builds."""
+    built: list[int] = []
+    compact = ir_inline._compact
+
+    def counting(*args):
+        built.append(1)
+        return compact(*args)
+
+    monkeypatch.setattr(ir_inline, "_compact", counting)
+    return built
+
+
+def test_inlining_rebuilds_each_caller_once_however_many_callees_it_splices(monkeypatch):
+    callees = []
+    for i in range(300):
+        b = BodyBuilder()
+        x = b.fresh()
+        (f,) = b.emit(Prim.flip(0.5 + 1e-6 * i), ())
+        (y,) = b.emit(Prim.and_(), (x, f))
+        callees.append(b.finish((x,), (y,)))
+    root = BodyBuilder(callees)
+    (w,) = root.emit(Prim.flip(0.5), ())
+    for i in range(300):
+        (w,) = root.emit(i, (w,))
+    p = prog(*callees, root.finish((), (w,)))
+    built = _count_rebuilds(monkeypatch)
+    out = inline(p)
+    assert len(built) == 1
+    validate(out)
+    assert len(reachable(out)) == 1
+    assert op_count(out) == 1 + 2 * 300
+
+
+def test_inlining_a_chain_of_nested_bodies_rebuilds_only_the_outermost(monkeypatch):
+    bodies: list[Body] = []
+    for i in range(300):
+        b = BodyBuilder(bodies)
+        x = b.fresh()
+        (f,) = b.emit(Prim.flip(0.5 + 1e-6 * i), ())
+        (y,) = b.emit(Prim.or_(), (x, f))
+        if i:
+            (y,) = b.emit(i - 1, (y,))
+        bodies.append(b.finish((x,), (y,)))
+    root = BodyBuilder(bodies)
+    (x,) = root.emit(Prim.flip(0.5), ())
+    (y,) = root.emit(len(bodies) - 1, (x,))
+    p = prog(*bodies, root.finish((), (y,)))
+    built = _count_rebuilds(monkeypatch)
+    out = inline(p)
+    assert len(built) == 1
+    validate(out)
+    assert len(reachable(out)) == 1
+    assert op_count(out) == 1 + 2 * 300
+
+
+def test_inlining_keeps_a_body_called_twice_and_splices_its_single_use_callee_into_it():
+    h = _coin_pair()
+    mid = BodyBuilder([h])
+    (a,) = mid.emit(0, ())
+    (n,) = mid.emit(Prim.not_(), (a,))
+    twice = mid.finish((), (n,))
+    top = BodyBuilder([h, twice])
+    (p,) = top.emit(1, ())
+    (q,) = top.emit(1, ())
+    (r,) = top.emit(Prim.or_(), (p, q))
+    program = Program((h, twice, top.finish((), (r,))), 2)
+    out = inline(program)
+    validate(out)
+    assert len(reachable(out)) == 2                 # `h` goes into `twice`, which stays
+    assert use_counts(out)[out.main.callees()[0]] == 2
+    assert same_matrix(semantics(out), semantics(program))

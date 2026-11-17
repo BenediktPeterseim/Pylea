@@ -38,9 +38,10 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-# The band a magnitude may stay inside without the array being rescaled.  Wide enough that
-# no single contraction crosses it undetected, and wide enough that most arrays never leave
-# it, which saves a pass over each.
+# The band a magnitude may stay inside without the array being rescaled.  Chosen, not
+# fitted: the product of two magnitudes inside the band, summed over up to ``2**100`` terms,
+# stays inside the range of float64, and most arrays never leave the band, which saves a
+# pass over each.
 LO = 1e-100
 HI = 1e100
 
@@ -54,8 +55,11 @@ class Backend(Protocol):
     dtype: Any                      # the array dtype evaluation runs in
     max_rank: int
     exact: bool                     # False where the dtype is narrower than float64
-    tiny: float                     # the smallest normal magnitude the dtype represents
+    # The log of the smallest normal magnitude of the dtype: a product below it may have
+    # lost precision or become zero, also on a kernel that flushes subnormal numbers.
+    log_underflow_unit: float
 
+    def leaf(self, host: np.ndarray, log_scale: float = 0.0) -> tuple[Any, Any]: ...
     def asarray(self, a) -> Any: ...
     def zeros(self, n: int) -> Any: ...
     def ones(self, n: int) -> Any: ...
@@ -70,13 +74,15 @@ class Backend(Protocol):
     def scatter(self, index, values, size: int) -> Any: ...
     def add(self, a, b) -> Any: ...
     def to_numpy(self, t) -> np.ndarray: ...
+    def log_min_positive(self, t) -> float: ...
+    def finish(self, t, scale) -> tuple[np.ndarray, float]: ...
 
-    # -- the magnitude, in whatever form this backend prefers -------------------------
+    # The magnitude, in whatever form the backend prefers.
     def scale_zero(self) -> Any: ...
     def scale_add(self, a, b) -> Any: ...
     def scale_float(self, s) -> float: ...
-    def renormalise(self, t, scale) -> tuple[Any, Any]: ...
-    def align(self, ta, sa, tb, sb) -> tuple[Any, Any, Any]: ...
+    def renormalise(self, t, scale) -> tuple[Any, Any, float, float | None]: ...
+    def align(self, ta, sa, tb, sb) -> tuple[Any, Any, Any, float, float]: ...
 
 
 class NumpyBackend:
@@ -89,9 +95,12 @@ class NumpyBackend:
 
     def __init__(self) -> None:
         self.dtype = np.float64
-        self.tiny = float(np.finfo(self.dtype).tiny)
+        self.log_underflow_unit = math.log(float(np.finfo(self.dtype).tiny))
 
-    # -- construction ---------------------------------------------------------------
+    def leaf(self, host: np.ndarray, log_scale: float = 0.0):
+        """A primitive's matrix, already brought into the band, as a flat array, and its
+        log scale."""
+        return np.ascontiguousarray(host, dtype=self.dtype).reshape(-1), log_scale
 
     def asarray(self, a) -> np.ndarray:
         return np.ascontiguousarray(a, dtype=self.dtype).reshape(-1)
@@ -106,8 +115,6 @@ class NumpyBackend:
         """A flat integer index array, in whatever form `gather` and `scatter` want."""
         return np.asarray(a, dtype=np.intp).reshape(-1)
 
-    # -- shape ----------------------------------------------------------------------
-
     def view(self, t, shape) -> np.ndarray:
         return t.reshape(tuple(shape))
 
@@ -116,8 +123,6 @@ class NumpyBackend:
 
     def permute(self, t, perm) -> np.ndarray:
         return np.transpose(t, tuple(perm))
-
-    # -- arithmetic -----------------------------------------------------------------
 
     def matmul(self, a, b) -> np.ndarray:
         return np.matmul(a, b)
@@ -144,7 +149,18 @@ class NumpyBackend:
     def to_numpy(self, t) -> np.ndarray:
         return np.asarray(t)
 
-    # -- magnitude ------------------------------------------------------------------
+    def log_min_positive(self, t) -> float:
+        """The log of the smallest positive entry of `t`, infinity where it has none."""
+        positive = t[t > 0.0]
+        return math.log(float(positive.min())) if positive.size else math.inf
+
+    def finish(self, t, scale) -> tuple[np.ndarray, float]:
+        """The result as a numpy array, which the caller owns, and its log scale as a
+        float."""
+        array = np.asarray(t)
+        if not array.flags.writeable or not array.flags.owndata:
+            array = array.copy()
+        return array, float(scale)
 
     def scale_zero(self) -> float:
         return 0.0
@@ -156,25 +172,173 @@ class NumpyBackend:
         return float(s)
 
     def renormalise(self, t, scale):
-        """``(t, scale)`` with `t` brought inside the band and what was removed added to
-        `scale`.
+        """``(t, scale, log_max, removed)``: `t` brought inside the band, the log of what
+        was divided out, `removed`, added to `scale`, and the log of the largest entry of
+        the `t` returned.
 
         The largest entry is the magnitude, every matrix a plan holds being non-negative and
-        contraction only adding and multiplying such entries.
+        contraction only adding and multiplying such entries.  An array of zeros has no
+        magnitude, so its scale is minus infinity, which no other array's scale loses to
+        when the two are added.
         """
         m = float(t.max()) if t.size else 0.0
-        if m > 0.0 and not (LO <= m <= HI):
-            return t / m, scale + math.log(m)
-        return t, scale
+        if m == 0.0:
+            return t, -math.inf, -math.inf, 0.0
+        if not (LO <= m <= HI):
+            return t / m, scale + math.log(m), 0.0, math.log(m)
+        return t, scale, math.log(m), 0.0
 
     def align(self, ta, sa, tb, sb):
-        """``(ta, tb, scale)``, the two arrays rescaled to a common magnitude for adding."""
+        """``(ta, tb, scale, log_fa, log_fb)``: the two arrays multiplied by the factors
+        whose logs are `log_fa` and `log_fb`, to the common `scale`, for adding."""
         s = max(sa, sb)
         if s == -math.inf:
-            return ta, tb, sa
-        fa = math.exp(sa - s) if sa != -math.inf else 0.0
-        fb = math.exp(sb - s) if sb != -math.inf else 0.0
-        return ta * fa, tb * fb, s
+            return ta, tb, s, -math.inf, -math.inf
+        la, lb = sa - s, sb - s
+        fa = math.exp(la) if la != -math.inf else 0.0
+        fb = math.exp(lb) if lb != -math.inf else 0.0
+        return ta * fa, tb * fb, s, la, lb
+
+
+class ExtendedRangeBackend(NumpyBackend):
+    """Flat arrays of float64 numbers that each carry an exponent of their own.
+
+    Entry ``x`` is held as ``m + e*1j``, a complex number whose real part is the mantissa
+    `m`, in ``[0.5, 1)`` or 0, and whose imaginary part is the integer `e` with
+    ``x = m * 2**e``.  Products multiply mantissas and add exponents, and sums bring
+    their terms to the largest exponent first, so every operation keeps the relative
+    precision of float64 while no entry can leave the range of a float, however large or
+    small it is.  Reshaping, permuting, gathering and scattering act on the complex
+    arrays unchanged.  The price is several times the arithmetic of `NumpyBackend`;
+    `pylea.eval.interp.evaluate_certified` uses it where float64 cannot vouch for a
+    result.
+
+    The product of two entries of 1e-300, 1e-600, keeps its value, and `finish` returns
+    it as an array and a log scale:
+
+        >>> B = ExtendedRangeBackend()
+        >>> t, scale = B.leaf(np.array([1e-300, 2e-300]), 0.0)
+        >>> one = B.view(B.ones(1), (1, 1, 1))
+        >>> product = B.matmul(B.view(t, (2, 1, 1)), B.view(t, (2, 1, 1)))
+        >>> array, scale = B.finish(B.flatten(product), scale)
+        >>> array.round(12).tolist(), round(scale, 3)
+        ([0.25, 1.0], -1380.165)
+    """
+
+    name = "numpy-extended"
+    exact = True
+    # A product never underflows here, so no contraction is ever in danger, and a
+    # primitive's matrix is taken as it is.
+    log_underflow_unit = -math.inf
+    keeps_every_range = True
+    def __init__(self) -> None:
+        self.dtype = np.complex128
+
+    def leaf(self, host: np.ndarray, log_scale: float = 0.0):
+        """A primitive's matrix with the factor ``exp(log_scale)`` folded into its
+        exponents, and the scale 0 that remains."""
+        exponent, fraction = divmod(log_scale / math.log(2.0), 1.0)
+        mantissa = np.ascontiguousarray(host, dtype=np.float64).reshape(-1) * 2.0 ** fraction
+        return _joined(mantissa, np.full(mantissa.shape, exponent)), 0.0
+
+    def asarray(self, a) -> np.ndarray:
+        return np.ascontiguousarray(a, dtype=np.complex128).reshape(-1)
+
+    def zeros(self, n: int) -> np.ndarray:
+        return np.zeros(n, dtype=np.complex128)
+
+    def ones(self, n: int) -> np.ndarray:
+        return np.full(n, 0.5 + 1.0j)
+
+    def matmul(self, a, b) -> np.ndarray:
+        """The batched product, exact to float64 rounding in every entry.
+
+        Each row of `a` and each column of `b` is scaled by its own largest power of two,
+        and the scaled operands are multiplied in float64.  A product of two scaled
+        entries is lost only below the smallest normal number, so an output entry far
+        above ``inner`` times that number is accurate to rounding; only the other
+        entries, which are rare, are summed term by term with their exponents.
+        """
+        ma, ea = _parts(a)
+        mb, eb = _parts(b)
+        row = ea.max(axis=2, keepdims=True)
+        column = eb.max(axis=1, keepdims=True)
+        row = np.where(np.isfinite(row), row, 0.0)
+        column = np.where(np.isfinite(column), column, 0.0)
+        product = np.matmul(_shifted(ma, ea - row), _shifted(mb, eb - column))
+        exponent = row + column                         # (batch, left, right)
+        inner = a.shape[2]
+        trusted = product >= inner * _TRUSTED_ABOVE
+        out = _joined(product, exponent)
+        k, i, j = np.nonzero(~trusted)
+        rows = max(1, _CHUNK // max(1, inner))
+        for start in range(0, k.size, rows):
+            kk, ii, jj = k[start:start + rows], i[start:start + rows], j[start:start + rows]
+            out[kk, ii, jj] = _summed(ma[kk, ii, :] * mb[kk, :, jj],
+                                      ea[kk, ii, :] + eb[kk, :, jj], axis=1)
+        return out
+
+    def sum_axis(self, t, axis: int) -> np.ndarray:
+        return _summed(*_parts(t), axis=axis)
+
+    def add(self, a, b):
+        ma, ea = _parts(a)
+        mb, eb = _parts(b)
+        return _summed(np.stack([ma, mb]), np.stack([ea, eb]), axis=0)
+
+    def log_min_positive(self, t) -> float:
+        return 0.0
+
+    def finish(self, t, scale) -> tuple[np.ndarray, float]:
+        mantissa, exponent = _parts(t)
+        top = float(exponent.max()) if exponent.size else -math.inf
+        if top == -math.inf:
+            return np.zeros(t.shape), -math.inf
+        array = _shifted(mantissa, exponent - top)
+        peak = float(array.max())
+        return array / peak, float(scale) + top * math.log(2.0) + math.log(peak)
+
+    def renormalise(self, t, scale):
+        return t, scale, 0.0, 0.0
+
+    def align(self, ta, sa, tb, sb):
+        return ta, tb, sa, 0.0, 0.0
+
+
+# Terms summed one by one per chunk in `ExtendedRangeBackend.matmul`: ``2**22`` float64.
+_CHUNK = 1 << 22
+
+# A float64 sum at least this far above the smallest normal number, per term, loses less
+# than its own rounding to products that fell below that number: ``2**-1022 / 2**-53``.
+_TRUSTED_ABOVE = 2.0 ** -969
+
+
+def _parts(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The mantissas of `t` and their exponents, minus infinity for zero entries."""
+    mantissa = t.real
+    return mantissa, np.where(mantissa == 0.0, -math.inf, t.imag)
+
+
+def _joined(mantissa: np.ndarray, exponent: np.ndarray) -> np.ndarray:
+    """``mantissa * 2**exponent`` in the form of `ExtendedRangeBackend`."""
+    m, shift = np.frexp(mantissa)
+    exponent = np.where(m == 0.0, 0.0, exponent + shift)
+    return m + 1j * exponent
+
+
+def _shifted(mantissa: np.ndarray, by: np.ndarray) -> np.ndarray:
+    """``mantissa * 2**by`` for ``by <= 0``, zero where `by` is minus infinity."""
+    # 2**-1100 is below every float64, so a lower power changes nothing.
+    by = np.maximum(np.where(np.isfinite(by), by, -1100.0), -1100.0)
+    return np.ldexp(mantissa, by.astype(np.int64))
+
+
+def _summed(mantissa: np.ndarray, exponent: np.ndarray, axis: int) -> np.ndarray:
+    """The sum along `axis` of ``mantissa * 2**exponent``, in extended form."""
+    top = exponent.max(axis=axis, keepdims=True)
+    top = np.where(np.isfinite(top), top, 0.0)
+    total = _shifted(mantissa, exponent - top).sum(axis=axis)
+    return _joined(total, np.squeeze(top, axis=axis))
 
 
 class TorchBackend:
@@ -204,9 +368,12 @@ class TorchBackend:
             dtype = torch.float32 if self.device.type == "mps" else torch.float64
         self.dtype = dtype
         self.exact = dtype == torch.float64
-        self.tiny = float(torch.finfo(dtype).tiny)
+        self.log_underflow_unit = math.log(float(torch.finfo(dtype).tiny))
 
-    # -- construction ---------------------------------------------------------------
+    def leaf(self, host: np.ndarray, log_scale: float = 0.0):
+        """A primitive's matrix, already brought into the band, as a flat tensor, and its
+        log scale as this backend holds scales."""
+        return self.asarray(host), self.scale_add(self.scale_zero(), log_scale)
 
     def asarray(self, a):
         if isinstance(a, self.torch.Tensor):
@@ -228,8 +395,6 @@ class TorchBackend:
         return self.torch.as_tensor(np.asarray(a).reshape(-1), dtype=self.torch.long,
                                     device=self.device)
 
-    # -- shape ----------------------------------------------------------------------
-
     def view(self, t, shape):
         return t.reshape(tuple(shape))
 
@@ -238,8 +403,6 @@ class TorchBackend:
 
     def permute(self, t, perm):
         return t.permute(tuple(perm))
-
-    # -- arithmetic -----------------------------------------------------------------
 
     def matmul(self, a, b):
         return self.torch.matmul(a, b)
@@ -264,7 +427,16 @@ class TorchBackend:
     def to_numpy(self, t) -> np.ndarray:
         return t.detach().to("cpu").numpy()
 
-    # -- magnitude ------------------------------------------------------------------
+    def log_min_positive(self, t) -> float:
+        """The log of the smallest positive entry of `t`, infinity where it has none; one
+        read from the device."""
+        positive = t[t > 0]
+        return math.log(float(positive.min())) if positive.numel() else math.inf
+
+    def finish(self, t, scale) -> tuple[np.ndarray, float]:
+        """The result as a numpy array, which the caller owns, and its log scale as a
+        float."""
+        return np.array(self.to_numpy(t), dtype=np.float64), float(scale)
 
     def scale_zero(self):
         # The scale shares the array's dtype, MPS refusing float64 for anything at all.  A
@@ -281,34 +453,43 @@ class TorchBackend:
         return float(s)
 
     def renormalise(self, t, scale):
-        """``(t, scale)`` with `t` rescaled and what was removed added to `scale`.
+        """``(t, scale, log_max, removed)`` as `NumpyBackend.renormalise` gives them.
 
         On the CPU this tests the band as `NumpyBackend.renormalise` does.  On an
         accelerator it rescales at every step instead, since testing the band means reading
-        the magnitude back to the host; the module docstring gives the trade.
+        the magnitude back to the host; the module docstring gives the trade.  There
+        `log_max` is 0, an upper bound once the largest entry has been divided out,
+        `removed` is `None`, unknown to the host, and an all-zero tensor keeps its scale:
+        telling it apart would need a read from the device, and its scale is accounted
+        for where tensors are added, see `align`.
         """
         if not t.numel():
-            return t, scale
+            return t, scale, -math.inf, 0.0
         if self.host_reads_are_free:
             m = float(t.max())
-            if m > 0.0 and not (LO <= m <= HI):
-                return t / m, scale + math.log(m)
-            return t, scale
+            if m == 0.0:
+                return t, scale - math.inf, -math.inf, 0.0
+            # The band suits float64; a narrower dtype is rescaled at every step, since
+            # the band reaches beyond its range.
+            if not (self.exact and LO <= m <= HI):
+                return t / m, scale + math.log(m), 0.0, math.log(m)
+            return t, scale, math.log(m), 0.0
         m = t.max()
-        # An all-zero intermediate has magnitude 0 and must not divide, so it and its scale
-        # are left alone.  `where` keeps the branch on the device.
+        # `where` keeps the branch on the device.
         safe = self.torch.where(m > 0, m, self.torch.ones_like(m))
-        return t / safe, scale + self.torch.log(safe.to(scale.dtype))
+        return t / safe, scale + self.torch.log(safe.to(scale.dtype)), 0.0, None
 
     def align(self, ta, sa, tb, sb):
-        """``(ta, tb, scale)``, the two tensors rescaled to a common magnitude for adding.
-
-        Without the negative-infinity case `NumpyBackend.align` carries: a scale here only
-        grows by the log of a magnitude `renormalise` has already found positive.
-        """
+        """``(ta, tb, scale, log_fa, log_fb)`` as `NumpyBackend.align` gives them; the two
+        log factors are read from the device, once per sum of slices."""
         s = self.torch.maximum(sa, sb)
-        return (ta * self.torch.exp(sa - s).to(ta.dtype),
-                tb * self.torch.exp(sb - s).to(tb.dtype), s)
+        neg = self.torch.tensor(-math.inf, dtype=s.dtype, device=s.device)
+        if float(s) == -math.inf:
+            return ta, tb, s, -math.inf, -math.inf
+        la = self.torch.where(sa == neg, neg, sa - s)
+        lb = self.torch.where(sb == neg, neg, sb - s)
+        return (ta * self.torch.exp(la).to(ta.dtype), tb * self.torch.exp(lb).to(tb.dtype),
+                s, float(la), float(lb))
 
 
 def _pick_device(torch) -> str:
@@ -321,8 +502,9 @@ def _pick_device(torch) -> str:
 
 # The fixed overhead of one plan step, per device, in microseconds.  These are launch floors
 # rather than throughputs: a device pays them whatever the step computes.  The CPU figure is
-# `pylea.compile.cost.MS_PER_STEP` and the MPS figure was timed on an Apple M3 Pro; the
-# CUDA figure is not measured.
+# `pylea.compile.cost.MS_PER_STEP`.  The MPS figure was timed per step on the MPS device of
+# an Apple M3 Pro; not reproducible from this repository.  The CUDA figure is chosen, not
+# measured.  Re-measure after changing `pylea.eval` or torch.
 LAUNCH_US = {"cpu": 3.5, "mps": 40.0, "cuda": 10.0}
 
 # The lowest launch floor of any accelerator, used to ask whether a device could pay at all
@@ -360,8 +542,10 @@ def worth_a_device(steps: float, ops: float, device: str = "mps") -> bool:
 
 
 # How much faster an accelerator's arithmetic is once it is not launch-bound.  Timed on the
-# MPS device of an Apple M3 Pro over batched matrix multiplication and transposes, taking the
-# low end of the range so that `worth_a_device` errs towards the CPU.
+# MPS device of an Apple M3 Pro over batched matrix multiplication and transposes, against
+# numpy on its CPU, taking the low end of the range so that `worth_a_device` errs towards
+# the CPU; not reproducible from this repository.  Re-measure after changing numpy or
+# torch.
 _SPEEDUP = 8.0
 
 
@@ -377,16 +561,41 @@ def is_cpu_device(device: str | None) -> bool:
     return device in (None, "auto", "numpy", "cpu")
 
 
+_DEVICE_NAMES = ("'auto', 'numpy', or a torch device such as 'cpu', 'cuda', 'cuda:1' "
+                 "or 'mps'")
+
+
+def _torch_device(device):
+    """`device` as a `torch.device`, or the errors `select` documents."""
+    try:
+        import torch
+    except ImportError:
+        raise ImportError(
+            f"device={device!r} evaluates with torch, which is not installed; install it "
+            "with pip install 'pylea[gpu]', or pass device='numpy'") from None
+    try:
+        return torch.device(device)
+    except (RuntimeError, TypeError):
+        raise ValueError(f"device must be {_DEVICE_NAMES}; got {device!r}") from None
+
+
 def select(device: str | None = None, *, steps: float | None = None,
            ops: float | None = None) -> Backend:
     """The backend to evaluate on.
 
-    `device` names one outright, either ``"numpy"`` or anything torch accepts.  Otherwise
-    the choice follows `worth_a_device` from `steps` and `ops`, and is numpy where those are
-    not given, an accelerator never being chosen merely for being present.
+    `device` names one outright, either ``"numpy"`` or a torch device such as ``"cpu"``,
+    ``"cuda"``, ``"cuda:1"`` or ``"mps"``.  Otherwise the choice follows `worth_a_device`
+    from `steps` and `ops`, and is numpy where those are not given, an accelerator never
+    being chosen merely for being present.
+
+    A torch device without torch installed raises `ImportError` naming the extra that
+    installs it, and a name torch does not accept, such as ``"gpu"``, `ValueError`
+    listing the accepted ones.
     """
     if device is not None and device != "auto":
-        return NumpyBackend() if device == "numpy" else TorchBackend(device)
+        if device == "numpy":
+            return NumpyBackend()
+        return TorchBackend(_torch_device(device))
     if steps is None or ops is None:
         return NumpyBackend()
     # Importing torch costs seconds, so ask the cheapest question first: could any accelerator

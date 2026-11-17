@@ -45,7 +45,7 @@ def test_internal_observes_become_a_static_scale_on_the_collapsed_table():
 
     collapsed = collapse(pair.program())
     assert len(collapsed.bodies) == 1
-    assert np.allclose(semantics(pair.program(), max_wires=20),
+    assert np.allclose(semantics(pair.program(), max_bits=20),
                        semantics(collapsed))
     # The cell's internal evidence is state-independent once collapsed, so the
     # interpreter moves it into the log factor: the particles condition on nothing and
@@ -138,3 +138,30 @@ def test_the_scheduled_pipeline_runs_on_a_collapsed_program():
     exact = float(strip.compiled().distribution()[1])
     estimate = float(result.counts[1] / result.total)
     assert abs(estimate - exact) < 0.05
+
+
+def test_a_body_whose_unsliced_cost_is_over_the_cap_is_declined_without_slicing(
+        monkeypatch):
+    import pylea.compile.lower as lower
+    import pylea.sample.collapse as collapse_module
+
+    kappas = []
+    compile_program = lower.compile_program
+
+    def recording(program, finder, kappa):
+        kappas.append(kappa)
+        return compile_program(program, finder, kappa=kappa)
+
+    monkeypatch.setattr(lower, "compile_program", recording)
+    monkeypatch.setattr(collapse_module, "COLLAPSE_COST_CAP", 0)
+
+    @DPP
+    def pair() -> Bool:
+        return flip(0.3) & flip(0.6)
+
+    @DPP
+    def caller() -> Bool:
+        return pair() | flip(0.1)
+
+    collapse(caller.program())
+    assert kappas == [None]

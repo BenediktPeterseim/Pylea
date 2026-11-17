@@ -1,4 +1,4 @@
-"""Flip lifting.
+"""Lifting of coin flips.
 
 Take a wire `e` read by several disjunctions and by nothing but `AND` and `OR` gates, and
 the gate `d` through which every path from `e` up to a wire that leaves the circuit passes.
@@ -20,10 +20,10 @@ disjunctions, or conjunctions for the dual, so that the rewrite deletes more tha
 
 `e` is a coin flip in the sense of `pylea.simplify.common.is_flip`, a primitive reading
 nothing and producing `e` alone: its op has the one wire `e` and moves to the new gate at no
-cost.
-A primitive with further results cannot move, as they are read where they are, and lifting
-a wire computed from other wires can raise the cost, as its op stays where its arguments are
-while `e` has to reach `d`; what such a wire's reads admit is left to `pylea.simplify.mask`.
+cost.  A primitive with further results cannot move, as they are read where they are, and
+lifting a wire computed from other wires can raise the cost, as its op stays where its
+arguments are while `e` has to reach `d`; what such a wire's reads admit is left to
+`pylea.simplify.mask`.
 
 The region of a lift is the set of gates reached by going up from `e` and stopping at `d`,
 `d`'s own included.  A wire of the region other than `d` is read by gates of the region
@@ -36,6 +36,11 @@ proposes sites from one dominator pass and applies, in one sweep, every site who
 disjoint from those of the sites taken before it.  A site whose region meets one of those is
 checked again against the body as it then stands, and applied on its own where it still
 holds.  The rounds go on until one proposes no site.
+
+Each site checked again is a sweep of the body, so a round takes time up to the number of
+sites whose regions meet times the size of the body.  This grows with the square of the
+size of a body whose sites overlap throughout.  Only a deadline bounds it;
+`pylea.simplify.driver` gives measured times.
 """
 from __future__ import annotations
 

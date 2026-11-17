@@ -21,8 +21,25 @@ rules whose cost grows faster than the size of a body: `pylea.simplify.fold.bloc
 `pylea.simplify.fold.bottom_cse`, `pylea.simplify.mask.mask`,
 `pylea.simplify.absorb.absorb` and `pylea.simplify.lift.lift`.  Once the deadline has
 passed, each of these stops looking for sites and applies the rewrites it has found, which
-takes one sweep of each body.  The phase therefore outlasts its budget by about one sweep
-of the DPP, whichever rule is running when the budget runs out.
+takes one sweep of each body.  Every other rule takes one sweep of each body in any case;
+for `pylea.simplify.inline.inline` that is a sweep of each body that stays, which is built
+once with its callees spliced in.  The phase therefore outlasts its budget by about one
+sweep of the DPP, whichever rule is running when the budget runs out.
+
+Without `budget_ms`, no rule is bounded by wall clock.  The memory of `absorb` is bounded
+in either case, by `pylea.simplify.implication.MAX_RELATION_BYTES`.  The time of `mask`
+and `lift` grows with the size of the body times the number of reads or sites they test,
+so with the square of the size on bodies like those below; their module docstrings say
+why.  Measured on an Apple M3 Pro, on bodies of coin flips and of `AND`, `OR` and `NOT`
+gates shaped like fault trees, every result read, which `simplify` reduces to one op:
+
+    ops of the body   simplify   mask within it   mask alone   lift alone
+              5,065      1.1 s            0.6 s        0.6 s        2.3 s
+             10,100      2.7 s            2.0 s        2.2 s        8.4 s
+             20,190      8.8 s            7.0 s        8.3 s       30.5 s
+
+"Alone" is the rule applied once to the body as given; within `simplify` the rules before
+`lift` shrink the body first.
 """
 from __future__ import annotations
 

@@ -21,8 +21,9 @@ differing only in the sketch they are built from.
 
 The result carries its own display: `Diagram.svg` for the markup, `Diagram.tikz` for a
 figure to include in a LaTeX document, `Diagram.save` for a file, `Diagram.show` to open one
-in a browser, and inline rendering in a notebook.  Nothing here needs a package outside the
-standard library, and no layout program is called.
+in a browser, and inline rendering in a notebook.  The layout is computed here, with scipy,
+a dependency of Pylea, for the ranking step of `pylea.draw.layout`; no layout program is
+called.
 
     >>> from pylea.examples.disease import test
     >>> d = diagram_of(test.program(), title="test")
@@ -66,7 +67,8 @@ class Diagram:
         """This picture as a complete ``<svg>`` element.
 
         `theme` is ``"auto"`` to follow the reader's setting, or ``"light"`` or ``"dark"``
-        to fix the colours; a page of a fixed colour needs the latter, since a file loaded
+        to fix the colours.  The picture paints its own background, so it is readable on
+        any page; a page of a fixed colour asks for the matching theme, since a file loaded
         through an ``img`` element cannot see the colours of the page holding it.
         """
         return to_svg(self.sketch, self.placement, self.style, theme)
@@ -83,7 +85,7 @@ class Diagram:
 
         ``.svg`` writes the markup and ``.tex`` a standalone LaTeX document, since a file
         written on its own is one meant to be looked at rather than included.  Any other
-        suffix raises `ValueError`.
+        suffix raises `ValueError`.  `theme` applies to ``.svg`` only; see `Diagram.svg`.
         """
         path = Path(path)
         suffix = path.suffix.lower()
@@ -97,20 +99,24 @@ class Diagram:
         return path
 
     def show(self) -> Path:
-        """The path of a temporary copy of this picture, now opened in a browser."""
+        """The path of a temporary copy of this picture, now opened in a browser.
+
+        Raises `RuntimeError` naming the written file where no browser could be opened,
+        as on a machine without a display, so that the file can be opened by hand.
+        """
         handle = tempfile.NamedTemporaryFile("w", suffix=".svg", delete=False,
                                              encoding="utf-8")
         with handle:
             handle.write(self.svg())
         path = Path(handle.name)
-        webbrowser.open(path.as_uri())
+        if not webbrowser.open(path.as_uri()):
+            raise RuntimeError(f"no browser could be opened to show the diagram; it is "
+                               f"written to {path}")
         return path
 
     def _repr_mimebundle_(self, include=None, exclude=None) -> dict:
-        """The picture and a one-line summary, for a notebook to render."""
-        width, height = self.size
-        return {"image/svg+xml": self.svg(),
-                "text/plain": f"<diagram {round(width)} x {round(height)}>"}
+        """The picture and its `repr`, for a notebook to render."""
+        return {"image/svg+xml": self.svg(), "text/plain": repr(self)}
 
     def __repr__(self) -> str:
         width, height = self.size
@@ -122,16 +128,19 @@ def diagram_of(prog: Program, body: int | None = None, body_names=None, op_names
                input_names=None, output_names=None, title: str = "",
                style: Style | None = None,
                sweeps: int | None = None,
-               wire_groups=(), input_widths=None, output_widths=None) -> Diagram:
+               wire_groups=(), input_widths=None, output_widths=None,
+               op_groups=()) -> Diagram:
     """The dot diagram of one definition of `prog`, the main function where `body` is
     left out.
 
     `body_names` and `op_names` label a called definition and an assignment of this
-    definition by index.  `wire_groups` names tuples of wires each standing for one
-    variable, drawn as a single dot wherever the definition keeps them together;
-    `input_widths` and `output_widths` give the number of wires of each interface
-    variable, one wire each where left out; and `input_names` and `output_names` label
-    the variable at each interface position.  `style` sets the sizes and `sweeps` bounds
+    definition by index, the name of an assignment calling a definition taking precedence.
+    `wire_groups` names tuples of wires each standing for one variable, drawn as a single
+    dot wherever the definition keeps them together; `op_groups` names tuples of
+    assignments recorded by one call, drawn as one box where they are the bits of one
+    constant or of one uniform choice; `input_widths` and `output_widths` give the number
+    of wires of each interface variable, one wire each where left out; and `input_names`
+    and `output_names` label the variable at each interface position.  `style` sets the sizes and `sweeps` bounds
     the ordering step of the layout.
 
         >>> from pylea import DPP, Bool, flip
@@ -143,7 +152,8 @@ def diagram_of(prog: Program, body: int | None = None, body_names=None, op_names
     """
     style = style or Style()
     sketch = sketch_of(prog, body, body_names, op_names, input_names,
-                       output_names, title, wire_groups, input_widths, output_widths)
+                       output_names, title, wire_groups, input_widths, output_widths,
+                       op_groups)
     return Diagram(sketch, place(sketch, style, sweeps), style)
 
 

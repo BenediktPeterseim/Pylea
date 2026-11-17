@@ -12,6 +12,13 @@ on the screen.  Both axes point up, as a placement's do, so no coordinate is tur
 Four styles carry the appearance and a document may redefine any of them: `pylea wire`,
 `pylea outline`, `pylea solid` and `pylea label`.
 
+Labels are written as they are, apart from the characters LaTeX reads as markup.  A label
+with a character outside Latin-1, such as a Greek or Chinese name, needs a Unicode engine,
+LuaLaTeX or XeLaTeX, and a typewriter font that has the character; pdfLaTeX stops at it.
+The standalone document chooses its font setup by engine: the T1 font encoding under
+pdfLaTeX and `fontspec` under the other two, where a document may then set a font with
+`\setmonofont`.
+
     >>> from pylea.examples.disease import test
     >>> tikz = test.diagram().tikz()
     >>> tikz.startswith("\\begin{tikzpicture}"), tikz.rstrip().endswith("\\end{tikzpicture}")
@@ -19,7 +26,7 @@ Four styles carry the appearance and a document may redefine any of them: `pylea
 """
 from __future__ import annotations
 
-from pylea.draw.glyph import Style
+from pylea.draw.glyph import Style, number_text
 from pylea.draw.layout import Placement
 from pylea.draw.sketch import Sketch
 
@@ -30,11 +37,6 @@ _STROKE = 0.075
 _ESCAPES = {"\\": r"\textbackslash{}", "~": r"\textasciitilde{}",
             "^": r"\textasciicircum{}", "×": r"$\times$",
             **{c: "\\" + c for c in "{}_#&%$"}}
-
-
-def _n(value: float) -> str:
-    """`value` rounded to a hundredth, without a trailing zero."""
-    return f"{round(value, 2):g}"
 
 
 def _escape(text: str) -> str:
@@ -52,7 +54,7 @@ def _path(path, x: float, y: float) -> str:
     out = []
     for seg in path:
         head, rest = seg[0], [(x + seg[i], y + seg[i + 1]) for i in range(1, len(seg), 2)]
-        points = [f"({_n(px)},{_n(py)})" for px, py in rest]
+        points = [f"({number_text(px)},{number_text(py)})" for px, py in rest]
         if head == "M":
             out.append(points[0])
         elif head == "L":
@@ -64,18 +66,16 @@ def _path(path, x: float, y: float) -> str:
     return "".join(out)
 
 
-
-
-
 def to_tikz(sketch: Sketch, placement: Placement, style: Style | None = None,
             standalone: bool = False) -> str:
     """`sketch`, laid out as `placement`, as a `tikzpicture`.
 
     `standalone` wraps it in a document of the `standalone` class, which compiles on its
-    own and is what a caller checking a figure wants.
+    own and is what a caller checking a figure wants.  See the module docstring for labels
+    outside Latin-1.
     """
     style = style or Style()
-    stroke = _n(_STROKE * style.font_size)
+    stroke = number_text(_STROKE * style.font_size)
     band = style.font_size * 2.4 if sketch.title else 0.0
     # A title wider than the picture would overflow the bounding box, so the box grows
     # symmetrically around the centred title where it needs to.
@@ -91,9 +91,10 @@ def to_tikz(sketch: Sketch, placement: Placement, style: Style | None = None,
         "line join=round},",
         "    pylea solid/.style={draw=none,fill=black},",
         "    pylea label/.style={inner sep=0pt,text=black,font=\\ttfamily"
-        f"\\fontsize{{{_n(style.font_size)}}}{{{_n(style.font_size * 1.2)}}}\\selectfont}}]",
-        f"  \\useasboundingbox ({_n(-over)},{_n(-band)}) rectangle "
-        f"({_n(placement.width + over)},{_n(placement.height)});",
+        f"\\fontsize{{{number_text(style.font_size)}}}"
+        f"{{{number_text(style.font_size * 1.2)}}}\\selectfont}}]",
+        f"  \\useasboundingbox ({number_text(-over)},{number_text(-band)}) rectangle "
+        f"({number_text(placement.width + over)},{number_text(placement.height)});",
     ]
 
     for wire in placement.routes:
@@ -108,12 +109,12 @@ def to_tikz(sketch: Sketch, placement: Placement, style: Style | None = None,
             kind = "pylea solid" if shape.solid else "pylea outline"
             lines.append(f"  \\path[{kind}] {_path(shape.path, x, y)};")
         for label in glyph.labels:
-            lines.append(f"  \\node[pylea label] at ({_n(x + label.x)},{_n(y + label.y)}) "
-                         f"{{{_escape(label.text)}}};")
+            lines.append(f"  \\node[pylea label] at ({number_text(x + label.x)},"
+                         f"{number_text(y + label.y)}) {{{_escape(label.text)}}};")
 
     if sketch.title:
-        lines.append(f"  \\node[pylea label] at ({_n(placement.width / 2)},"
-                     f"{_n(-band / 2)}) {{{_escape(sketch.title)}}};")
+        lines.append(f"  \\node[pylea label] at ({number_text(placement.width / 2)},"
+                     f"{number_text(-band / 2)}) {{{_escape(sketch.title)}}};")
 
     lines.append("\\end{tikzpicture}")
     picture = "\n".join(lines)
@@ -121,4 +122,7 @@ def to_tikz(sketch: Sketch, placement: Placement, style: Style | None = None,
     if not standalone:
         return picture
     return ("\\documentclass[tikz,border=2pt]{standalone}\n"
+            "\\usepackage{iftex}\n"
+            "\\ifPDFTeX\n  \\usepackage[T1]{fontenc}\n"
+            "\\else\n  \\usepackage{fontspec}\n\\fi\n"
             "\\begin{document}\n" + picture + "\n\\end{document}\n")

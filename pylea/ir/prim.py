@@ -193,17 +193,21 @@ class Prim:
     def from_matrix(cls, arr) -> Prim:
         """A primitive standing for `arr`.
 
-        Raises `ValueError` unless `arr` is two-dimensional, non-negative, and has a power
-        of two rows and columns, those being the sides of ``(2**out_bits, 2**in_bits)``.
+        Raises `ValueError` unless `arr` is two-dimensional, finite, non-negative, and has a
+        power of two rows and columns, those being the sides of
+        ``(2**out_bits, 2**in_bits)``.  The primitive holds a read-only copy, so the
+        caller's array is never changed.
 
             >>> Prim.from_matrix([[0.9, 0.4], [0.1, 0.6]]).in_bits
             1
         """
-        a = np.ascontiguousarray(arr, dtype=float)
+        a = np.array(arr, dtype=float, order="C")
         if a.ndim != 2:
             raise ValueError(f"a matrix must be 2-d; got shape {a.shape}")
         rows, cols = a.shape
         out_bits, in_bits = _exact_log2(rows, "rows"), _exact_log2(cols, "columns")
+        if not np.isfinite(a).all():
+            raise ValueError("a matrix must have finite entries")
         if a.min() < 0.0:
             raise ValueError("a matrix must be non-negative")
         a.flags.writeable = False

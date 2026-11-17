@@ -85,6 +85,26 @@ def test_the_matrix_must_be_non_negative():
         LikelihoodTable((), (Bool,), np.array([[0.5], [-0.5]]))
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_a_matrix_with_nan_or_inf_is_refused(bad):
+    with pytest.raises(ValueError, match="finite"):
+        LikelihoodTable((), (Bool,), np.array([[bad], [0.5]]))
+
+
+def test_a_lone_type_where_a_tuple_of_types_is_expected_is_refused_with_a_hint():
+    with pytest.raises(TypeError, match=r"\(Bool,\)"):
+        LikelihoodTable((Bool), (Bool,), np.eye(2))
+    with pytest.raises(TypeError, match=r"\(Coin,\)"):
+        LikelihoodTable((Bool,), (Coin), np.eye(2))
+    with pytest.raises(TypeError, match="use Bool"):
+        LikelihoodTable((bool,), (Bool,), np.eye(2))
+
+
+def test_a_table_shows_its_types_and_shape_in_its_repr():
+    assert repr(LikelihoodTable((Bool,), (Coin,), np.eye(2))) == (
+        "<LikelihoodTable (Bool,) -> (Coin,), 2 x 2>")
+
+
 def test_a_magnitude_beyond_float64_raises_rather_than_underflowing():
     """The scale is folded into the matrix only where that loses nothing."""
     @DPP
@@ -100,3 +120,22 @@ def test_str_decodes_patterns_to_the_declared_values():
     text = str(biased.evaluated())
     assert "heads" in text and "tails" in text
     assert "0.25" in text and "0.75" in text
+# ------------------------------------------------- folding a log scale into a table
+
+from pylea.semantics.likelihood_table import scaled_matrix  # noqa: E402
+
+
+def test_scaling_an_entry_into_the_subnormal_range_is_refused():
+    with pytest.raises(ValueError, match="full precision"):
+        scaled_matrix(np.array([[0.5], [1.0]]), -720.0)
+
+
+def test_a_subnormal_entry_given_in_the_array_is_kept():
+    scaled = scaled_matrix(np.array([[1e-310], [1.0]]), -1.0)
+    assert scaled[1, 0] == pytest.approx(np.exp(-1.0))
+    assert scaled[0, 0] > 0.0
+
+
+def test_a_scale_whose_factor_is_subnormal_still_gives_normal_entries_exactly():
+    scaled = scaled_matrix(np.array([[1e100]]), -720.0)
+    assert scaled[0, 0] == pytest.approx(1e100 * np.exp(-720.0), rel=1e-14)

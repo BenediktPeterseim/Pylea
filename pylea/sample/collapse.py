@@ -11,14 +11,14 @@ unfolded at all, which is what gives the sampling lane the exact engine's depth 
 on such DPPs.
 
 A body qualifies when every call inside it has already been collapsed, its interface
-wires are single bits with at most `COLLAPSE_IN_BITS` in and `COLLAPSE_OUT_BITS` out,
-the greedy plan prices its contraction under `COLLAPSE_COST_CAP` scalar multiplications,
-and the resulting table fits float64.  The output cap is tighter than the input cap
-because the sampler's generic column path draws from ``2**out_bits`` rows per
-particle.  A body that is a pure function of its inputs is also left alone: as gates the
-packed executor advances 64 particles per word through it, while as a table it would
-force a per-particle gather.  The caps bound the pass's own cost: each attempted body
-costs one greedy compile and at most one capped evaluation.
+wires are single bits with at most `pylea.sample.cost_model.COLLAPSE_IN_BITS` in and
+`COLLAPSE_OUT_BITS` out, the greedy plan prices its contraction under
+`COLLAPSE_COST_CAP` scalar multiplications, and the resulting table fits float64.  The
+output cap is tighter than the input cap because the sampler's generic column path draws
+from ``2**out_bits`` rows per particle.  A body that is a pure function of its inputs is
+also left alone: as gates the packed executor advances 64 particles per word through it,
+while as a table it would force a per-particle gather.  The caps bound the pass's own cost:
+each attempted body costs one greedy compile and at most one capped evaluation.
 
 Only exactly evaluated tables are spliced.  An estimated sub-table would compose
 soundly only through monotone two-run propagation, running the caller once with the
@@ -31,20 +31,11 @@ from __future__ import annotations
 from pylea.ir.body import Body, Op
 from pylea.ir.prim import Prim
 from pylea.ir.program import Program, intern, reachable
+from pylea.sample.cost_model import (
+    COLLAPSE_COST_CAP, COLLAPSE_IN_BITS, COLLAPSE_OUT_BITS,
+)
 from pylea.semantics.likelihood_table import scaled_matrix
 
-# Interface caps, as bits, and the per-body greedy contraction-cost cap.  The bit caps
-# bound a spliced table to 2**20 entries, the same bound `pylea.sample.cost_model`
-# puts on a sampled table's width, with the output side tighter because the sampler's
-# column draw costs a row gather per particle per halving of the row count.  The cost
-# cap is in scalar multiplications of the greedy plan, priced by
-# `pylea.compile.cost.OPS_PER_MS`: 1e6 is 0.01 ms of arithmetic on the numpy backend
-# of the machine that constant was timed on, below the per-step dispatch floor, so an
-# attempted collapse costs its greedy compile and dispatch rather than its evaluation.
-# Re-measure with `OPS_PER_MS`, after changing the evaluator or the cost model.
-COLLAPSE_IN_BITS = 12
-COLLAPSE_OUT_BITS = 8
-COLLAPSE_COST_CAP = 1e6
 
 
 def collapse(prog: Program) -> Program:
@@ -132,6 +123,11 @@ def _exact_table(body: Body) -> Prim | None:
 
     single = Program((body,), root=0)
     try:
+        # The tree without slicing is priced first: slicing never lowers the cost, and
+        # slicing a tree far wider than the size limit can take minutes.
+        unsliced, _root = compile_program(single, GreedyOrderFinder(), kappa=None)
+        if contraction_cost(unsliced) > COLLAPSE_COST_CAP:
+            return None
         plans, root = compile_program(single, GreedyOrderFinder(), kappa=DEFAULT_KAPPA)
     except Exception:                   # noqa: BLE001, an unplannable body stays sampled
         return None

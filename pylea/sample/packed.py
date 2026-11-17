@@ -19,9 +19,9 @@ of its arguments, and a boundary op's 0/1 column mass a gathered mask.
 Coin flips are drawn through `pylea.sample.sweep.draw_flips`, byte for byte the same
 stream the byte lane draws, and then packed.  The two executors therefore produce
 identical counts from an identical generator state, and the equality test in
-`test.sample.test_kernels` compares them exactly rather than statistically.  Coin flip
-generation dominates the packed runtime, the gates having become 64 times cheaper; the
-boundary-refinement draw keeps it at about one random byte per particle per coin flip.
+`test.sample.test_kernels` compares them exactly rather than statistically.  A packed gate
+advances 64 particles per word; drawing the coin flips is per particle, at about one
+random byte per particle per coin flip with the boundary-refinement draw.
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ class PackedProgram:
         self.binary_weights = True
         self.n_stages = program.n_stages
         self.peak_planes = program.peak_planes
-        self._steps = [packed for step in program._steps
+        self._steps = [packed for step in program.steps
                        for packed in _packed_steps(step)]
 
     @property

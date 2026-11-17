@@ -99,3 +99,20 @@ def test_idempotence_deletes_a_gate_on_one_wire_twice_and_absorbs_nothing_else(g
     assert same_matrix(semantics(out), semantics(p))
     assert _tags(out) == [Tag.FLIP, Tag.FLIP, Tag.AND, Tag.OR]
     assert out.main.ops[2].args == (x, y)
+
+
+@pytest.mark.parametrize("deadline", [None, float("inf")])
+def test_absorb_builds_no_relation_beyond_its_memory_bound_and_still_deletes_a_gate_reading_one_wire_twice(
+        deadline, monkeypatch):
+    monkeypatch.setattr("pylea.simplify.implication.MAX_RELATION_BYTES", 1)
+    b = BodyBuilder()
+    (x,) = b.emit(Prim.flip(0.3), ())
+    (y,) = b.emit(Prim.flip(0.4), ())
+    (r,) = b.emit(Prim.and_(), (y, y))
+    (a,) = b.emit(Prim.and_(), (x, r))
+    (o,) = b.emit(Prim.or_(), (a, x))                    # a implies x
+    p = prog(b.finish((), (o,)))
+    out = absorb(p, deadline=deadline)
+    validate(out)
+    assert same_matrix(semantics(out), semantics(p))
+    assert _tags(out) == [Tag.FLIP, Tag.FLIP, Tag.AND, Tag.OR]

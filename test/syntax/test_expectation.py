@@ -85,7 +85,7 @@ def test_the_expectation_survives_evidence_too_small_for_a_likelihood_table():
 
 
 def test_expectation_rejects_a_dpp_with_inputs():
-    with pytest.raises(ValueError, match="zero-input"):
+    with pytest.raises(ValueError, match="no inputs"):
         expectation(two_inputs_dpp)  # type: ignore[arg-type]
 
 
@@ -99,7 +99,7 @@ def test_expectation_rejects_an_output_whose_values_are_not_numbers():
     def colour() -> Color:
         return Color.uniform()
 
-    with pytest.raises(ValueError, match="are numbers"):
+    with pytest.raises(ValueError, match="real numbers"):
         expectation(colour)
 
 
@@ -111,7 +111,7 @@ def test_expectation_rejects_an_output_of_a_type_holding_several_values():
     def both() -> Pair:
         return Pair(*Die.uniform().bits(), *Die.uniform().bits())
 
-    with pytest.raises(ValueError, match="are numbers"):
+    with pytest.raises(ValueError, match="real numbers"):
         expectation(both)
 
 
@@ -137,3 +137,54 @@ def test_evidence_of_probability_zero_raises_rather_than_dividing():
 
     with pytest.raises(ZeroDivisionError):
         expectation(impossible)
+
+
+def test_an_expectation_of_values_that_are_not_finite_is_refused():
+    import pytest
+
+    from pylea import DPP, Enum, expectation
+
+    class Reward(Enum):
+        elements = [0.0, 1.0, float("inf")]
+
+    @DPP
+    def reward() -> Reward:
+        return Reward.random({0.0: 0.5, 1.0: 0.5, float("inf"): 0.0})
+
+    with pytest.raises(ValueError, match="finite"):
+        expectation(reward)
+
+
+def test_an_expectation_of_an_integer_beyond_the_float_range_is_refused():
+    import pytest
+
+    from pylea import DPP, Enum, expectation
+
+    class Huge(Enum):
+        elements = [0, 10 ** 400]
+
+    @DPP
+    def huge() -> Huge:
+        return Huge.uniform()
+
+    with pytest.raises(ValueError, match="finite"):
+        expectation(huge)
+
+
+
+def test_an_expectation_of_decimal_values_names_the_number_types_it_takes():
+    from decimal import Decimal
+
+    import pytest
+
+    from pylea import DPP, Enum, expectation
+
+    class Price(Enum):
+        elements = [Decimal("1.5"), Decimal("2")]
+
+    @DPP
+    def price() -> Price:
+        return Price.uniform()
+
+    with pytest.raises(ValueError, match="real numbers, such as int, float or Fraction"):
+        expectation(price)

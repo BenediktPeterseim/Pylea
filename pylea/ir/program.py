@@ -10,12 +10,10 @@ went, which is what a caller holding a table keyed by body index needs.
 order every traversal here uses.  `use_counts` counts call sites per body across the whole
 DPP rather than within one caller.
 
-Four measures describe a body.  `consumer_counts` gives the readers of each wire, counting
-each output position as a read.  `shared_reads` sums the readers beyond the first, so a
-wire read three times counts twice, and `multi_parent_wires` instead counts the wires
-having any.  `op_count` sums the ops over distinct reachable bodies, and `wire_slots`
-counts every op argument and result plus the interface, which is the number of axes in
-the body's network.
+`consumer_counts` and `shared_reads` measure a body, and `op_count` measures the DPP.
+`consumer_counts` gives the readers of each wire, counting each output position as a
+read.  `shared_reads` sums the readers beyond the first, so a wire read three times counts
+twice.  `op_count` sums the ops over distinct reachable bodies.
 
 `discardable` and `deterministic` lift the two `pylea.ir.prim.Prim` properties to bodies: a
 body has either where all of its ops do, recursively.  Neither converse holds, so `False`
@@ -28,8 +26,8 @@ means the property was not established rather than that it fails.
     >>> (y,) = b.emit(Prim.not_(), (x,))
     >>> (z,) = b.emit(Prim.and_(), (y, y))
     >>> prog = Program((b.finish(inputs=(x,), outputs=(z,)),), root=0)
-    >>> op_count(prog), shared_reads(prog.main), wire_slots(prog.main)
-    (2, 1, 7)
+    >>> op_count(prog), shared_reads(prog.main)
+    (2, 1)
 """
 from __future__ import annotations
 
@@ -48,10 +46,12 @@ class Program:
     root: int
 
     def body(self, i: int) -> Body:
+        """The body at index `i` of the table."""
         return self.bodies[i]
 
     @property
     def main(self) -> Body:
+        """The root body, the main function of the DPP."""
         return self.bodies[self.root]
 
 
@@ -146,8 +146,8 @@ def consumer_counts(body: Body) -> Counter:
         >>> body = b.finish(inputs=(x, y), outputs=(z, z))
         >>> dict(consumer_counts(body))
         {0: 1, 1: 1, 2: 2}
-        >>> multi_parent_wires(body), shared_reads(body), wire_slots(body)
-        (1, 1, 7)
+        >>> shared_reads(body)
+        1
     """
     counts: Counter = Counter()
     for op in body.ops:
@@ -158,29 +158,13 @@ def consumer_counts(body: Body) -> Counter:
     return counts
 
 
-def multi_parent_wires(body: Body) -> int:
-    """The number of wires of `body` that are read more than once."""
-    return sum(1 for n in consumer_counts(body).values() if n >= 2)
-
-
 def shared_reads(body: Body) -> int:
     """The reads beyond the first, summed over the wires of `body`.
 
     How much sharing there is, rather than how many wires carry any: a wire read three
-    times counts twice, where `multi_parent_wires` counts it once.
+    times counts twice.
     """
     return sum(n - 1 for n in consumer_counts(body).values() if n >= 2)
-
-
-def wire_slots(body: Body) -> int:
-    """The wire positions of `body`: every op argument and result, plus its interface.
-
-    One position is one axis of one tensor in the body's network, so this is the network's
-    total rank.  It falls where an op loses an argument without being removed, and where a
-    body stops returning something, neither of which `op_count` or `shared_reads` can see.
-    """
-    return (sum(len(op.args) + len(op.outs) for op in body.ops)
-            + len(body.inputs) + len(body.outputs))
 
 
 def discardable(prog: Program) -> dict[int, bool]:
@@ -299,31 +283,76 @@ def intern_with_remap(prog: Program) -> tuple[Program, dict[int, int]]:
 
 
 def validate(prog: Program) -> None:
-    """Nothing, or `ValueError` if `prog` violates the invariants `BodyBuilder` maintains."""
+    """Nothing, or `ValueError` if `prog` violates the invariants `BodyBuilder` maintains.
+
+    It checks that the root is a body; that every wire named is one of its body; that no
+    input is repeated; that every op calls a primitive or an existing body, with as many
+    arguments and results as that callee has and of the same widths, reads only inputs
+    and results of earlier ops, and produces wires produced nowhere else; that every
+    output is available; and that no body calls itself, directly or through others.
+    """
+    n = len(prog.bodies)
+    if not 0 <= prog.root < n:
+        raise ValueError(f"root {prog.root} is not a body index")
     for i, b in enumerate(prog.bodies):
-        produced: set[int] = set()
+        def in_body(w: int, what: str) -> None:
+            if not 0 <= w < len(b.bits):
+                raise ValueError(f"body {i}: {what} {w} is not a wire of this body")
+
+        for w in b.inputs:
+            in_body(w, "input")
+        for w in b.outputs:
+            in_body(w, "output")
+        if len(set(b.inputs)) != len(b.inputs):
+            raise ValueError(f"body {i}: input wire repeated in {b.inputs}")
+        available = set(b.inputs)
         for op in b.ops:
+            if not isinstance(op.callee, Prim) and not (
+                    isinstance(op.callee, int) and 0 <= op.callee < n):
+                raise ValueError(f"body {i}: call to unknown body {op.callee!r}")
+            for w in op.args:
+                in_body(w, "argument")
+                if w not in available:
+                    raise ValueError(
+                        f"body {i}: {op} reads wire {w} before any op produces it")
+            for w in op.outs:
+                in_body(w, "result")
             in_w, out_w = signature(op.callee, prog.bodies)
             if len(op.args) != len(in_w) or len(op.outs) != len(out_w):
                 raise ValueError(f"body {i}: arity mismatch in {op}")
-            for w, want in zip(op.args, in_w):
+            for w, want in zip(op.args + op.outs, in_w + out_w):
                 if b.bits[w] != want:
-                    raise ValueError(f"body {i}: {op} argument wire {w} has width "
-                                     f"{b.bits[w]}, expected {want}")
+                    raise ValueError(f"body {i}: {op} wire {w} has width {b.bits[w]}, "
+                                     f"expected {want}")
             for w in op.outs:
-                if w in produced:
+                if w in available:
                     raise ValueError(f"body {i}: wire {w} produced twice (not SSA)")
-                produced.add(w)
-            if not isinstance(op.callee, Prim) and not 0 <= op.callee < len(prog.bodies):
-                raise ValueError(f"body {i}: call to unknown body {op.callee}")
-        for w in b.inputs:
-            if w in produced:
-                raise ValueError(f"body {i}: input wire {w} is also produced by an op")
-        for w in {w for op in b.ops for w in op.args} | set(b.outputs):
-            if w not in produced and w not in b.inputs:
+                available.add(w)
+        for w in b.outputs:
+            if w not in available:
                 raise ValueError(
-                    f"body {i}: wire {w} is read but neither an input nor produced")
-        if len(set(b.inputs)) != len(b.inputs):
-            raise ValueError(f"body {i}: input wire repeated in {b.inputs}")
-    if not 0 <= prog.root < len(prog.bodies):
-        raise ValueError(f"root {prog.root} is not a body index")
+                    f"body {i}: output wire {w} is neither an input nor produced")
+    _check_acyclic(prog)
+
+
+def _check_acyclic(prog: Program) -> None:
+    """Nothing, or `ValueError` if some body calls itself, directly or through others;
+    an iterative depth-first search with three colours."""
+    state = [0] * len(prog.bodies)             # 0 unseen, 1 on the path, 2 done
+    for start in range(len(prog.bodies)):
+        if state[start]:
+            continue
+        state[start] = 1
+        stack = [(start, iter(prog.bodies[start].callees()))]
+        while stack:
+            body, pending = stack[-1]
+            callee = next(pending, None)
+            if callee is None:
+                state[body] = 2
+                stack.pop()
+            elif state[callee] == 1:
+                raise ValueError(f"body {body} calls body {callee}, which calls it back: "
+                                 "a DPP cannot recurse")
+            elif state[callee] == 0:
+                state[callee] = 1
+                stack.append((callee, iter(prog.bodies[callee].callees())))

@@ -13,7 +13,7 @@ import pytest
 
 from pylea.compile.cost import (
     MS_PER_STEP, OPS_PER_MS, contraction_cost, predicted_ms, predicted_ms_from_cost,
-    step_count, tree_cost,
+    step_count,
 )
 from pylea.compile.lower import compile_program
 from pylea.compile.order import GreedyOrderFinder
@@ -71,17 +71,6 @@ def test_steps_are_counted_per_slice_only_where_they_vary():
     assert step_count(plans) == total
     assert any(p.n_slices > 1 for p in plans.values()), "no plan was sliced"
     assert any(not v for p in plans.values() for v in p.varying), "nothing was hoisted"
-
-
-@pytest.mark.parametrize("kappa", [1, 2, 3])
-def test_the_tree_cost_does_not_depend_on_slicing(kappa):
-    """The greedy tree is the same with and without slicing, so its cost must be too, while
-    the multiplications performed grow with the slices."""
-    program = _clique(5)
-    held, sliced = _plans(program), _plans(program, kappa=kappa)
-    assert any(p.n_slices > 1 for p in sliced.values()), "no plan was sliced"
-    assert tree_cost(sliced) == tree_cost(held)
-    assert contraction_cost(sliced) > contraction_cost(held)
 
 
 def test_counts_past_the_float_range_are_infinite_rather_than_an_error():

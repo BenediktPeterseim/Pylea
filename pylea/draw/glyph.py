@@ -13,7 +13,11 @@ second outline inside the first where the DPP is given the variable rather than 
 it.  Everything else is a box carrying a label.
 
 `Style` holds the sizes.  Text widths are estimated as a fixed fraction of the font size per
-character, which holds because the backends set a monospace family.
+column, which holds because the backends set a monospace family.  A wide or full-width
+character, as most Chinese, Japanese and Korean characters are, takes two columns, which is
+how a monospace font sets it.
+
+`number_text` is how both backends write a coordinate or a size.
 
     >>> g = glyph_of(GlyphKind.AND, "", 2, 1, Style())
     >>> g.width, g.height, g.in_ports, g.out_ports
@@ -24,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, auto
 from math import sqrt
+from unicodedata import east_asian_width
 
 # Control point offset, as a fraction of the radius, for a quarter circle drawn as a cubic.
 _KAPPA = 4.0 / 3.0 * (sqrt(2.0) - 1.0)
@@ -73,8 +78,13 @@ class Style:
     scale: float = 1.0
 
     def text_width(self, text: str) -> float:
-        """The width `text` takes at this style's font size."""
-        return self.text_aspect * self.font_size * len(text)
+        """The width `text` takes at this style's font size.
+
+            >>> Style().text_width("name") == Style().text_width("名前")
+            True
+        """
+        columns = sum(2 if east_asian_width(c) in ("W", "F") else 1 for c in text)
+        return self.text_aspect * self.font_size * columns
 
 
 # A path segment, in the four forms every backend can draw.
@@ -331,6 +341,15 @@ def entry_point(glyph: Glyph, centre, aim, coming_from) -> tuple[float, float]:
             outside = half
     return (coming_from[0] + (aim[0] - coming_from[0]) * within,
             coming_from[1] + (aim[1] - coming_from[1]) * within)
+
+
+def number_text(value: float) -> str:
+    """`value` rounded to a hundredth, without a trailing zero.
+
+        >>> number_text(1.0), number_text(2.3456), number_text(-0.5)
+        ('1', '2.35', '-0.5')
+    """
+    return f"{round(value, 2):g}"
 
 
 def _within(x: float, y: float, a: float, b: float, r: float) -> bool:

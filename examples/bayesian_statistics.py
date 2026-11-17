@@ -5,9 +5,9 @@
 # quantities as random variables: a prior distribution states what is believed about them
 # before the data are seen, and conditioning on the data gives the posterior distribution.
 #
-# In Pylea, a model is a DPP that draws the unknown quantities from their prior,
-# conditions on each observation with `observe`, and returns what is asked about;
-# `probability_mass_function`, `prob` and `expectation` compute its posterior exactly.
+# In Pylea, a model is written as a DPP that draws the unknown quantities from their
+# prior, conditions on each observation with `observe`, and returns what is asked about;
+# `probability_mass_function`, `prob` and `expectation` compute its posterior.
 # Every variable takes finitely many values, so a continuous parameter is discretised on a
 # grid, as in the first and the third example.
 #
@@ -148,8 +148,9 @@ plt.show()
 # ## A bioassay
 #
 # Four groups of five animals were given a toxin at four doses, and 0, 1, 3 and 5 of them
-# died [2].  An animal at log dose `x` dies with probability `logistic(α + β x)`.  As in
-# [3], the prior on the parameters `α` and `β` is uniform on a grid of 50 × 50 values.
+# died [2].  An animal at log dose `x` dies with probability `logistic(α + β x)`.  The
+# analysis follows [3].  The prior on the parameters `α` and `β` is uniform on the grid of
+# 50 × 50 values of [4].
 # The outcome for one animal is a conditional probability table over that grid, one for
 # each dose, and `parameters` returns the parameters given every animal's outcome.
 
@@ -262,3 +263,6 @@ plt.show()
 #
 # [3] A. Gelman, J. B. Carlin, H. S. Stern, D. B. Dunson, A. Vehtari, D. B. Rubin.
 # *Bayesian Data Analysis*, 3rd ed., Section 3.7.  Chapman and Hall/CRC, 2013.
+#
+# [4] A. Vehtari, M. Paasiniemi.  Bayesian data analysis demo 3.6.  BDA R demos,
+# <https://github.com/avehtari/BDA_R_demos/blob/master/demos_ch3/demo3_6.R>.

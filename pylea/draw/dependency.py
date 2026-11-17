@@ -12,7 +12,9 @@ The edges come from `pylea.ir.dependency.direct_dependencies`, which works over 
 here they are lifted to variables, a variable being a segment of the interface that
 `input_widths` and `output_widths` mark off.  Variable `Y` depends on variable `X` where
 any wire of `Y` depends on any wire of `X`.  Two positions naming the same wires are one
-variable, so a DPP returning one value twice draws one box.
+variable, so a DPP returning one value twice draws one box.  A variable carrying the value
+of an earlier one under other wires, which a call to a definition returning its argument
+gives, is a box of its own with one arrow from the earlier one.
 
 A dependency is what a value is computed from, which for a DPP whose outputs are the
 variables of a network is that network.  It is not a statement about statistical
@@ -46,8 +48,8 @@ def dependency_sketch_of(prog: Program, body: int | None = None, input_names=Non
     `input_widths` and `output_widths` give the number of wires of each interface
     variable, every variable being one wire where they are left out, and `input_names` and
     `output_names` label the variable at each interface position.  A position with no name
-    is labelled by the interface it is on and its position there, and a label two variables
-    would share carries the index of the variable as well.
+    is labelled by the interface it is on and its position there, and a label several
+    variables would share is numbered among them, from 0 in interface order.
 
     Raises `ValueError` where the variables have no acyclic order, which happens where two
     of them are computed from each other bit by bit.
@@ -86,10 +88,14 @@ def _variables(in_segments, input_names, out_segments,
     """The variables of a body's interface: their wires, their labels, which are given.
 
     Positions naming the same wires are one variable, which takes the first label offered
-    for it and is given where any of those positions is an input.  A label two variables
-    would share, which is what a caller naming a position by its type offers for two
-    positions of one type, carries the index of the variable as well, since a node of this
-    picture is nothing but its label.
+    for it and is given where any of those positions is an input.  A label several
+    variables would share, which is what a caller naming a position by its type offers for
+    two positions of one type, is numbered among the variables carrying it, from 0 in
+    interface order, since a node of this picture is nothing but its label.
+
+        >>> _variables([(0,), (1,)], {0: "x", 1: "y"}, [(2,), (3,)],
+        ...            {0: "Bool", 1: "Bool"})[1]
+        ['x', 'y', 'Bool 0', 'Bool 1']
     """
     wires: list[tuple[int, ...]] = []
     labels: list[str] = []
@@ -110,8 +116,11 @@ def _variables(in_segments, input_names, out_segments,
                 given[i] = given[i] or is_input
 
     shared = {name for name, n in Counter(labels).items() if n > 1}
-    labels = [f"{name} {i}" if name in shared else name
-              for i, name in enumerate(labels)]
+    numbered: Counter[str] = Counter()
+    for i, name in enumerate(labels):
+        if name in shared:
+            labels[i] = f"{name} {numbered[name]}"
+            numbered[name] += 1
     return wires, labels, given
 
 

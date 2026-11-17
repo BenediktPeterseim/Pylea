@@ -10,6 +10,11 @@ permissions:
   pages: write
   id-token: write
 
+# One deployment to GitHub Pages at a time; a deployment in progress is not cancelled.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest

@@ -2,11 +2,14 @@
 
 This package estimates a DPP's semantics by running particles through the unfolded
 DPP.  Every answer it returns is certified: the reported interval contains the true
-value with probability at least the requested confidence, unconditionally, for any
-particle count, schedule and stopping time.  Efficiency depends on the DPP; validity
-never does.  All certificates are anytime-valid, built from confidence sequences, so
+value with probability at least the requested confidence, for any particle count,
+schedule and stopping time.  The cost depends on the DPP; the interval's validity does
+not.  The beta quantiles behind the Clopper-Pearson bounds are checked against the beta
+distribution function and recomputed by bisection where the library routine is
+inaccurate, and an interval whose ends are out of order raises rather than being
+returned.  All certificates are anytime-valid, built from confidence sequences, so
 stopping at an arbitrary moment, as a `max_time` deadline does, and reporting the current
-interval is sound.
+interval is sound.  The point estimate always lies in the interval.
 
 Two execution modes, chosen per query by `pylea.sample.pilot`:
 
@@ -22,9 +25,11 @@ Two execution modes, chosen per query by `pylea.sample.pilot`:
     Any [0, 1] certifier has a range floor: a mass of `rel_err * p` cannot be excluded on
     fewer than about ``L / (rel_err * p)`` samples, `L` the certificate's log factor, so
     certification below the floor is impossible in this mode however small the variance.
-    Sweep mode's place is survival and the anytime bounds that come with it: on every
-    query both modes can run, the mode arithmetic prices the i.i.d. mode lower, a
-    conclusion reached empirically across the constructed and corpus instances.
+    The pilot prices both modes for the quantity the query certifies, for a
+    conditioned DPP the quotient of two masses, and runs the cheaper.  A run in this
+    mode stops short of its target where the betting sequence's grid can no longer
+    resolve it, which only a run needing more than about 7e9 sweeps reaches; the trace
+    then says so.
 
 Cost, in order-of-magnitude terms with `q` the smallest mass the query certifies: the
 i.i.d. mode needs about ``L / (rel_err**2 * q)`` particles, the sweep mode about
@@ -42,9 +47,9 @@ over the conditioning stages.  Consequences a caller should know:
     which can be doubly exponentially small in the size of the DPP, so the table contract is
     per-entry: each entry is estimated to `rel_err` relative error or certified to lie
     below `floor`, jointly at the requested confidence.
-  * The mean of a value with a rare large contribution is expensive to certify: the cost
-    is proportional to the second moment over the squared mean of the value rescaled to
-    [0, 1].  This is a property of the estimation problem, not of the implementation.
+  * The cost of certifying a mean is proportional to the second moment over the squared
+    mean of the value rescaled to [0, 1], which is large where a rare large value
+    dominates the mean.
 
 Modules: `pylea.sample.sweep` runs particles on byte planes and `pylea.sample.packed` at
 64 per machine word, `pylea.sample.certify` holds the confidence sequences and the
@@ -54,5 +59,5 @@ failure-budget ledger, `pylea.sample.schedule` rewrites the DPP for lower varian
 certification, `pylea.sample.query` connects the public entry points to all of it,
 `pylea.sample.portfolio`, the portfolio algorithm, decides between this engine and the
 exact engine, `pylea.sample.estimate` holds the missed-target warning and the sampled
-table, and `pylea.sample.cost_model` keeps every tunable constant in one place.
+table, and `pylea.sample.cost_model` holds every tuned constant of the package.
 """

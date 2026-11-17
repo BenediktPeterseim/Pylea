@@ -214,8 +214,9 @@ def _beats(a: _Hand, b: _Hand) -> Bool:
 def showdown(hero_cards, villain_cards, board) -> Bool:
     """The event that `hero_cards` strictly beats `villain_cards` on `board`.
 
-    Cards are written names like ``"Kh"``.  Must be called inside a ``@DPP`` definition;
-    the deal is fixed, so the traced circuit is constant and the tests enumerate it.
+    Cards are written as names like ``"Kh"``.  Must be called inside a ``@DPP``
+    definition; the deal is fixed, so the recorded circuit is constant and the tests
+    enumerate it.
     """
     hero = _Hand([_card(c).components() for c in hero_cards + board])
     villain = _Hand([_card(c).components() for c in villain_cards + board])

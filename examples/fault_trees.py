@@ -3,18 +3,17 @@
 #
 # [Fault tree analysis](https://en.wikipedia.org/wiki/Fault_tree_analysis) computes the
 # probability that a system fails, the top-level event, from the probabilities that its
-# components fail, the basic events. Events are related by logic gates: 
-# AND (fails only if both child event fail), OR (fails if at least one child event failts), 
-# and voting (fail when at least `k` of their child events fail) gates.
+# components fail, the basic events.  Events are related by gates: AND (fails if all its
+# child events fail), OR (fails if at least one child event fails) and voting gates (fail
+# if at least `k` of their child events fail).
 #
 # In Pylea, a fault tree is a DPP that returns the top-level event as a `Bool`.  Each basic
 # event is a coin flip, `flip(p)`, and each gate is `&`, `|` or `at_least`.
 #
 # ## A cooling system
 #
-# The failure of a cooling system is modelled hierarchically using fault tree analysis as follows.
-# The cooling system fails if both pumps fail or the controller fails.  A pump fails if its 
-# motor or the power supply fails, and both pumps share one power supply.  The controller 
+# The cooling system fails if both pumps fail or the controller fails.  A pump fails if its
+# motor or the power supply fails, and both pumps share one power supply.  The controller
 # fails if at least two of its three sensors fail.  The probabilities are for illustration.
 
 # %%

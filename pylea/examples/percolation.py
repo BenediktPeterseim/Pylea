@@ -1,14 +1,15 @@
 r"""Seepage through a bed of gravel: how much water gets through.
 
-Water is poured onto the middle stone of the top layer of a bed `width` stones across and
-`layers` deep.  A wet stone wets each of the three stones beneath it, left, centre and
-right, along a channel that is open with probability `p`, the channels being independent.
-The stones at the two edges have fewer channels.
+Water is poured onto the middle stone of the top layer of a bed with `width` stones in
+every layer and `layers` layers below the top one.  A wet stone wets each of the three
+stones beneath it, left, centre and right, along a channel that is open with probability
+`p`, the channels being independent.  The stones at the two edges have fewer channels.
+With `width` 5 and `layers` 2:
 
-        o             the top layer, where the water goes in
-       /|\
-      o o o           every channel is open with probability `p`
-     /|\|/|\
+    o o * o o         the top layer; the water goes in at *
+    |X|X|X|X|         every channel is open with probability `p`
+    o o o o o
+    |X|X|X|X|
     o o o o o         the bottom layer, whose wet stones are counted
 
 `wet_stones` counts the stones of the bottom layer that end up wet, and its expected value

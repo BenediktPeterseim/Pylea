@@ -1,335 +1,492 @@
 """Bayesian networks from `.bif` files.
 
-`bif_to_python` renders one module per network; `make_query_module` renders a query against
-one; `convert_suite` and `generate_benchmarks` do each over a directory.  The module is also
-a command-line tool, described by its `--help`.
+`bif_to_python` renders one module per network; `convert_suite` does it over a folder.
+The module is also a command-line tool, described by its `--help`.
 
-Supported syntax:
+## Supported syntax
 
-    network NAME { }
-    variable NAME { type discrete [ N ] { s1, s2, ... }; }
-    probability ( VAR ) { table p1, p2, ...; }
-    probability ( VAR | P1, P2, ... ) { (v1, v2, ...) p1, p2, ...; ... }
-    // line comments
+    network NAME { property ...; }
+    variable NAME { type discrete [ N ] { S1, S2, ... }; property ...; }
+    probability ( VAR ) { table P1, P2, ...; }
+    probability ( VAR | PARENT1, PARENT2, ... ) {
+        ( S1, S2, ... ) P1, P2, ...;
+        default P1, P2, ...;
+        table P1, P2, ...;
+    }
+    // to the end of the line, and /* ... */, are comments
 
-Only discrete variables are supported.  A generated module holds one
-`pylea.syntax.enum.Enum` subclass per variable and one `@DPP` function returning the joint
-distribution in topological order.  A variable with parents becomes a `@DPP` function of
-its parents applying an `pylea.syntax.enum.Enum.cpt` call, so a diagram labels its box
-with that function's name; one without becomes `pylea.syntax.enum.Enum.random`.
+Commas and `|` separate tokens like spaces do, so ``{ t f }`` declares two states and
+``( B A )`` names the child `B` and its parent `A`.  A name or state is a run of
+characters other than spaces and ``{ } ( ) [ ] ; , |``, or any text in double quotes.
+`property` lines are ignored.
 
-A generated query asks ``P(leaf == first_state | evidence)``, the leaf being the variable
-that is never a parent and has the most ancestors, ties broken alphabetically.  Evidence
-variables are drawn at random from the rest under a seed, and their states come from one
-draw from the network, which makes the evidence typical and gives it positive probability by
-construction.  It is fixed as the module is written, so a query is a file to be read rather
-than a function of a seed.
+A row ``( S1, S2, ... )`` gives the child's distribution for the parents in the states
+named, one state per parent in the order of the header.  `default` gives it for every
+parent configuration no row names.  `table` lists every probability of the block at once:
+for a variable with parents, the child's first state for every parent configuration, then
+its second state, and so on, with the parent configurations counted with the last parent
+changing fastest.
+
+Everything else is refused with a `ValueError` naming the line and the variable: another
+kind of block or entry, a type other than `discrete`, a state count `N` that differs from
+the states listed, a state listed twice, a row with a number of probabilities other than
+the number of states, a negative probability, a row whose sum differs from 1 by more than
+1e-5, a row naming a state the parent does not have or given twice, a parent configuration
+with neither a row nor a `default`, a variable declared twice or without a probability
+block, two probability blocks for one variable, and variables that depend on each other in
+a cycle.
+
+## What is generated
+
+A module holding one `pylea.syntax.enum.Enum` subclass per variable, whose elements are
+the variable's states as the file writes them, and one `@DPP` function returning the
+variables, each after its parents, otherwise in the order of declaration.  A variable with
+parents is the result of a `@DPP` function of its parents, named after the variable and
+its parents, applying `pylea.syntax.enum.Enum.cpt`, so a diagram labels its box with that
+name; one without is drawn by `pylea.syntax.enum.Enum.random`.  A network of one variable
+returns that variable rather than a tuple.
+
+Each variable becomes a class whose name is the variable's with a capital first letter,
+and a local variable of its own name, in lower case where the name starts with a capital
+letter, so that it differs from the class.  Characters other than ASCII letters, digits and
+`_` become `_`, and a name that starts with a digit or `_`, or is a Python keyword, gets
+the prefix `v_`.  Names that would become the same identifier, or one the module uses
+itself (`DPP`, `Enum`, `tuple`, a class or a table function used in the same place), are
+told apart by a suffix `_2`, `_3`, and so on; a name that is already a valid identifier
+keeps it where it can.  A comment at the top of the module lists every variable written
+differently.
 """
 from __future__ import annotations
 
-import random
-import re
-import keyword
+import itertools
+import math
 from pathlib import Path
+from typing import NamedTuple
+
+from pylea.utility._codegen import (
+    Names, Token, convert_directory, literal, module_name, number, tokenize,
+    topological_order,
+)
+
+_PUNCTUATION = "{}()[];"
+_SEPARATORS = ",|"
+_ROW_SUM_TOLERANCE = 1e-5     # absolute; far above the rounding of published tables
+_RESERVED = ("DPP", "Enum", "tuple")
+_MULTILINE = 5                # more outputs than this are written one per line
 
 
-# ---------------------------------------------------------------------------
-# Name sanitisation
-# ---------------------------------------------------------------------------
+class _Reader:
+    """A cursor over the tokens of a file."""
 
-def _sanitize_class(name: str) -> str:
-    """`name` as a valid Python class name, capitalised."""
-    clean = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-    if not clean or clean[0].isdigit() or keyword.iskeyword(clean):
-        clean = f"V_{clean}"
-    return clean[0].upper() + clean[1:] if clean else clean
+    def __init__(self, tokens: list[Token]) -> None:
+        self.tokens = tokens
+        self.i = 0
+        self.last_line = tokens[-1].line if tokens else 1
+
+    def at_end(self) -> bool:
+        return self.i >= len(self.tokens)
+
+    def next(self, expected: str) -> Token:
+        """The next token, which the parser expects to be `expected`, a description."""
+        if self.at_end():
+            raise ValueError(f"line {self.last_line}: the file ends where {expected} is "
+                             "expected")
+        tok = self.tokens[self.i]
+        self.i += 1
+        return tok
+
+    def peek(self) -> Token | None:
+        return None if self.at_end() else self.tokens[self.i]
+
+    def keyword(self) -> str:
+        """The lower-cased text of the next token, or "" for a quoted one or the end."""
+        tok = self.peek()
+        return "" if tok is None or tok.quoted else tok.text.lower()
+
+    def expect(self, char: str) -> Token:
+        """The next token, which must be the punctuation character `char`."""
+        tok = self.next(f"'{char}'")
+        if not tok.is_mark(char):
+            raise ValueError(f"line {tok.line}: expected '{char}', found {tok.shown()}")
+        return tok
+
+    def name(self, what: str) -> Token:
+        tok = self.next(what)
+        if not tok.is_name():
+            raise ValueError(f"line {tok.line}: expected {what}, found {tok.shown()}")
+        return tok
+
+    def skip_statement(self) -> None:
+        """Past the next `;`, for a property line."""
+        while not (tok := self.next("';'")).is_mark(";"):
+            if tok.is_mark("{") or tok.is_mark("}"):
+                raise ValueError(f"line {tok.line}: a property ends without ';'")
+
+    def values(self, what: str) -> tuple[list[float], int]:
+        """The numbers up to the next `;`, and the line where they start."""
+        out: list[float] = []
+        nxt = self.peek()
+        line = self.last_line if nxt is None else nxt.line
+        while not (tok := self.next("';'")).is_mark(";"):
+            value = None if tok.quoted else number(tok.text)
+            if value is None:
+                raise ValueError(f"line {tok.line}: {what}: expected a probability, found "
+                                 f"{tok.shown()}")
+            out.append(value)
+        return out, line
 
 
-def _sanitize_var(name: str) -> str:
-    """`name` as a valid Python identifier, in lower case."""
-    clean = re.sub(r"[^a-zA-Z0-9_]", "_", name).lower()
-    if not clean or clean[0].isdigit() or keyword.iskeyword(clean):
-        clean = f"v_{clean}"
-    return clean
+class _Network(NamedTuple):
+    name: str | None                          # as the file names it
+    order: list[str]                          # variables in order of declaration
+    states: dict[str, list[str]]
+    parents: dict[str, list[str]]
+    rows: dict[str, dict[tuple[str, ...], list[float]]]   # every parent configuration
 
 
-def _sanitize_state(name: str) -> str:
-    """`name` as a string safe to use as a key in the generated source."""
-    return re.sub(r"[^a-zA-Z0-9_]", "_", name)
+class _Block(NamedTuple):
+    parents: list[str]
+    line: int
+    table: tuple[list[float], int] | None
+    default: tuple[list[float], int] | None
+    rows: dict[tuple[str, ...], tuple[list[float], int]]
 
 
-# ---------------------------------------------------------------------------
-# Parsing
-# ---------------------------------------------------------------------------
-
-def _strip_comments(text: str) -> str:
-    return re.sub(r"//[^\n]*", "", text)
-
-
-def _parse_bif(bif_string: str) -> tuple[
-    str,                              # network name
-    list[str],                        # variable declaration order
-    dict[str, list[str]],             # var_name -> [state_names] (sanitized)
-    dict[str, list[str]],             # var_name -> [parent_names] (original)
-    dict[str, dict[tuple, list[float]]], # var_name -> {(parent_val_tuple): [probs]}
-]:
-    text = _strip_comments(bif_string)
-
-    # Network name
-    net_m = re.search(r"network\s+(\S+)\s*\{", text)
-    network_name = _sanitize_var(net_m.group(1)) if net_m else "bayesian_network"
-    if network_name in ("unknown", ""):
-        network_name = "bayesian_network"
-
-    # Variables
-    var_order: list[str] = []
-    var_states: dict[str, list[str]] = {}
-
-    for m in re.finditer(
-        r"variable\s+(\S+)\s*\{[^}]*type\s+discrete\s*\[\s*\d+\s*\]\s*\{([^}]+)\}",
-        text,
-        re.DOTALL,
-    ):
-        vname = m.group(1).strip()
-        raw_states = [s.strip() for s in m.group(2).split(",") if s.strip()]
-        states = [_sanitize_state(s) for s in raw_states]
-        var_order.append(vname)
-        var_states[vname] = states
-
-    # Probability blocks
-    cpt_parents: dict[str, list[str]] = {}
-    cpt_rows: dict[str, dict[tuple, list[float]]] = {}
-
-    prob_block_re = re.compile(r"probability\s*\(([^)]+)\)\s*\{([^}]*)\}", re.DOTALL)
-    for m in prob_block_re.finditer(text):
-        header = m.group(1).strip()
-        body = m.group(2).strip()
-
-        if "|" in header:
-            parts = header.split("|", 1)
-            vname = parts[0].strip()
-            parents = [p.strip() for p in parts[1].split(",")]
+def _parse_bif(text: str) -> _Network:
+    """The network `text` describes, with every check of the module docstring applied."""
+    r = _Reader(tokenize(text, _PUNCTUATION, _SEPARATORS))
+    network: str | None = None
+    network_line = 0
+    declared: dict[str, tuple[list[str], int]] = {}
+    blocks: dict[str, _Block] = {}
+    while not r.at_end():
+        tok = r.next("a block")
+        kw = "" if tok.quoted else tok.text.lower()
+        if kw == "network":
+            if network_line:
+                raise ValueError(f"line {tok.line}: a second network block; the first is on "
+                                 f"line {network_line}")
+            network, network_line = r.name("the network's name").text, tok.line
+            r.expect("{")
+            while r.keyword() == "property":
+                r.next("property")
+                r.skip_statement()
+            r.expect("}")
+        elif kw == "variable":
+            name = r.name("a variable's name")
+            if name.text in declared:
+                raise ValueError(f"line {name.line}: variable {name.text!r} is declared twice, "
+                                 f"first on line {declared[name.text][1]}")
+            declared[name.text] = (_variable_body(r, name), name.line)
+        elif kw == "probability":
+            child, block = _probability_block(r, tok.line)
+            if child in blocks:
+                raise ValueError(f"line {tok.line}: a second probability block for "
+                                 f"{child!r}; the first is on line {blocks[child].line}")
+            blocks[child] = block
         else:
-            vname = header.strip()
-            parents = []
+            raise ValueError(f"line {tok.line}: expected 'network', 'variable' or "
+                             f"'probability', found {tok.shown()}")
 
-        cpt_parents[vname] = parents
-
-        rows: dict[tuple, list[float]] = {}
-
-        if not parents:
-            # table p1, p2, ...;
-            table_m = re.search(r"table\s+([\d.,\s eE+\-]+)\s*;", body)
-            if table_m:
-                probs = [float(p.strip()) for p in table_m.group(1).split(",") if p.strip()]
-                rows[()] = probs
-        else:
-            # (v1, v2, ...) p1, p2, ...;
-            row_re = re.compile(r"\(([^)]+)\)\s*([\d.,\s eE+\-]+)\s*;")
-            for row_m in row_re.finditer(body):
-                raw_vals = [v.strip() for v in row_m.group(1).split(",")]
-                key = tuple(_sanitize_state(v) for v in raw_vals)
-                probs = [float(p.strip()) for p in row_m.group(2).split(",") if p.strip()]
-                rows[key] = probs
-
-        cpt_rows[vname] = rows
-
-    return network_name, var_order, var_states, cpt_parents, cpt_rows
+    for child, block in blocks.items():
+        if child not in declared:
+            raise ValueError(f"line {block.line}: probability block for {child!r}, which is "
+                             "not declared as a variable")
+        for p in block.parents:
+            if p not in declared:
+                raise ValueError(f"line {block.line}: parent {p!r} of {child!r} is not "
+                                 "declared as a variable")
+    order = list(declared)
+    for v in order:
+        if v not in blocks:
+            raise ValueError(f"line {declared[v][1]}: variable {v!r} has no probability block")
+    states = {v: declared[v][0] for v in order}
+    rows = {v: _rows(v, blocks[v], states) for v in order}
+    return _Network(network, order, states, {v: blocks[v].parents for v in order}, rows)
 
 
-# ---------------------------------------------------------------------------
-# Code generation helpers
-# ---------------------------------------------------------------------------
-
-def _build_random(child_class: str, child_states: list[str], probs: list[float]) -> str:
-    items = ", ".join(f'"{s}": {p}' for s, p in zip(child_states, probs))
-    return f"{child_class}.random({{{items}}})"
-
-
-def _build_cpt_direct(
-    rows: dict[tuple, list[float]],
-    parent_cls_names: list[str],
-    child_class: str,
-    indent: int,
-) -> str:
-    """The source of a ``Child.cpt([ParentClass, ...], rows)`` expression.
-
-    Applied inside a `@DPP` function named after the table, which the definition of the
-    joint network calls: ``child = child_given_parent(p1, p2)``.
-    """
-    pad = "    " * indent
-    inner_pad = pad + "    "
-    row_pad = inner_pad + "    "
-
-    parent_types_str = "[" + ", ".join(parent_cls_names) + "]"
-
-    row_lines: list[str] = []
-    for key, probs in rows.items():
-        if len(key) == 1:
-            key_str = f'("{key[0]}",)'
-        else:
-            key_str = "(" + ", ".join(f'"{s}"' for s in key) + ")"
-        probs_str = "[" + ", ".join(repr(p) for p in probs) + "]"
-        row_lines.append(f"{row_pad}{key_str}: {probs_str},")
-
-    rows_block = "{\n" + "\n".join(row_lines) + "\n" + inner_pad + "}"
-    return (
-        f"{child_class}.cpt(\n"
-        f"{inner_pad}{parent_types_str},\n"
-        f"{inner_pad}{rows_block},\n"
-        f"{pad})"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Topological sort
-# ---------------------------------------------------------------------------
-
-def _topo_sort(var_order: list[str], cpt_parents: dict[str, list[str]]) -> list[str]:
-    parents_map = {v: list(cpt_parents.get(v, [])) for v in var_order}
-    sorted_vars: list[str] = []
-    remaining = list(var_order)
-    defined: set[str] = set()
-
-    max_passes = len(remaining) + 1
-    for _ in range(max_passes):
-        if not remaining:
+def _variable_body(r: _Reader, name: Token) -> list[str]:
+    """The states of the variable `name`, read from ``{`` to ``}``."""
+    r.expect("{")
+    states: list[str] | None = None
+    while True:
+        tok = r.next("'type', 'property' or '}'")
+        kw = "" if tok.quoted else tok.text.lower()
+        if kw == "}":
             break
-        progress = False
-        for v in remaining[:]:
-            if all(p in defined for p in parents_map[v]):
-                sorted_vars.append(v)
-                defined.add(v)
-                remaining.remove(v)
-                progress = True
-        if not progress:
-            raise ValueError(f"Cycle or undefined parents among: {remaining}")
+        if kw == "property":
+            r.skip_statement()
+            continue
+        if kw != "type":
+            raise ValueError(f"line {tok.line}: variable {name.text!r}: expected 'type', "
+                             f"'property' or '}}', found {tok.shown()}")
+        if states is not None:
+            raise ValueError(f"line {tok.line}: variable {name.text!r} has a second type")
+        kind = r.next("'discrete'")
+        if kind.quoted or kind.text.lower() != "discrete":
+            raise ValueError(f"line {kind.line}: variable {name.text!r} has type "
+                             f"{kind.shown()}; only discrete variables are supported")
+        r.expect("[")
+        count = r.next("the number of states")
+        if count.quoted or not count.text.isdigit():
+            raise ValueError(f"line {count.line}: variable {name.text!r}: expected the number "
+                             f"of states, found {count.shown()}")
+        r.expect("]")
+        r.expect("{")
+        states = []
+        while not (s := r.next("a state or '}'")).is_mark("}"):
+            if not s.is_name():
+                raise ValueError(f"line {s.line}: variable {name.text!r}: expected a state, "
+                                 f"found {s.shown()}")
+            if s.text in states:
+                raise ValueError(f"line {s.line}: variable {name.text!r} lists the state "
+                                 f"{s.text!r} twice")
+            states.append(s.text)
+        r.expect(";")
+        if int(count.text) != len(states) or not states:
+            raise ValueError(f"line {count.line}: variable {name.text!r} declares "
+                             f"{count.text} states and lists {len(states)}")
+    if states is None:
+        raise ValueError(f"line {name.line}: variable {name.text!r} has no type")
+    return states
 
-    return sorted_vars
+
+def _probability_block(r: _Reader, line: int) -> tuple[str, _Block]:
+    """The child a probability block is for, and the block, read from ``(`` to ``}``."""
+    r.expect("(")
+    child = r.name("the variable of the probability block").text
+    parents: list[str] = []
+    while not (tok := r.next("a parent or ')'")).is_mark(")"):
+        if not tok.is_name():
+            raise ValueError(f"line {tok.line}: expected a parent of {child!r}, found "
+                             f"{tok.shown()}")
+        if tok.text in parents:
+            raise ValueError(f"line {tok.line}: {child!r} lists the parent {tok.text!r} twice")
+        parents.append(tok.text)
+    r.expect("{")
+    table = default = None
+    rows: dict[tuple[str, ...], tuple[list[float], int]] = {}
+    where = f"variable {child!r}"
+    while True:
+        tok = r.next("an entry or '}'")
+        kw = "" if tok.quoted else tok.text.lower()
+        if kw == "}":
+            break
+        if kw == "property":
+            r.skip_statement()
+        elif kw == "table":
+            if table is not None:
+                raise ValueError(f"line {tok.line}: {where} has a second table")
+            table = r.values(where)
+        elif kw == "default":
+            if default is not None:
+                raise ValueError(f"line {tok.line}: {where} has a second default")
+            default = r.values(where)
+        elif kw == "(":
+            key: list[str] = []
+            while not (s := r.next("a state or ')'")).is_mark(")"):
+                if not s.is_name():
+                    raise ValueError(f"line {s.line}: {where}: expected a parent's state, "
+                                     f"found {s.shown()}")
+                key.append(s.text)
+            if tuple(key) in rows:
+                raise ValueError(f"line {tok.line}: {where} gives the row {tuple(key)} twice")
+            rows[tuple(key)] = r.values(where)
+        else:
+            raise ValueError(f"line {tok.line}: {where}: expected 'table', 'default', a row "
+                             f"or '}}', found {tok.shown()}")
+    if table is not None and (rows or default is not None):
+        raise ValueError(f"line {table[1]}: {where} has a table and rows; give one or the "
+                         "other")
+    return child, _Block(parents, line, table, default, rows)
 
 
-# ---------------------------------------------------------------------------
-# Main converter
-# ---------------------------------------------------------------------------
+def _rows(child: str, block: _Block, states: dict[str, list[str]]
+          ) -> dict[tuple[str, ...], list[float]]:
+    """The child's distribution for every parent configuration, checked.
+
+    Rows the block lists come first, in its order, then those its `default` fills or its
+    `table` gives, in counting order.
+    """
+    where = f"variable {child!r}"
+    width = len(states[child])
+    configs = list(itertools.product(*(states[p] for p in block.parents)))
+    given: dict[tuple[str, ...], tuple[list[float], int]] = {}
+    if block.table is not None:
+        values, line = block.table
+        if len(values) != width * len(configs):
+            needs = (f"{width} states and {len(configs)} parent configurations, so its "
+                     f"table needs {width * len(configs)} probabilities" if block.parents
+                     else f"{width} states")
+            raise ValueError(f"line {line}: {where} has {needs}, but its table has "
+                             f"{len(values)}")
+        stride = len(configs)
+        for c, config in enumerate(configs):
+            given[config] = (values[c::stride], line)
+    for key, (values, line) in block.rows.items():
+        if len(key) != len(block.parents):
+            raise ValueError(f"line {line}: {where}: the row {key} names {len(key)} states "
+                             f"for {len(block.parents)} parents")
+        for p, s in zip(block.parents, key):
+            if s not in states[p]:
+                raise ValueError(f"line {line}: {where}: the row {key} names the state "
+                                 f"{s!r}, which parent {p!r} does not have")
+        given[key] = (values, line)
+    if block.default is not None:
+        for config in configs:
+            given.setdefault(config, block.default)
+    out: dict[tuple[str, ...], list[float]] = {}
+    for config in list(given):
+        values, line = given[config]
+        row = f"the row {config}" if block.parents else "the table"
+        if len(values) != width:
+            raise ValueError(f"line {line}: {where} has {width} states, but {row} has "
+                             f"{len(values)} probabilities")
+        if any(v < 0.0 for v in values):
+            raise ValueError(f"line {line}: {where}: {row} has a negative probability")
+        total = math.fsum(values)
+        if abs(total - 1.0) > _ROW_SUM_TOLERANCE:
+            raise ValueError(f"line {line}: {where}: the probabilities of {row} sum to "
+                             f"{total!r}, not 1")
+        out[config] = values
+    for config in configs:
+        if config not in out:
+            raise ValueError(f"line {block.line}: {where} has no row for the parent states "
+                             f"{config} and no default")
+    return out
+
 
 def bif_to_python(bif_string: str, network_name: str | None = None) -> str:
     """The source of a standalone module for the network `bif_string` describes.
 
-    The module defines one `pylea.syntax.enum.Enum` subclass per variable, one conditional
-    probability table per variable with parents, and a `@DPP` function returning the joint
-    distribution.  `network_name` overrides the name of that function, which otherwise comes
-    from the file.
+    The module defines one `pylea.syntax.enum.Enum` subclass per variable, one `@DPP`
+    function per variable with parents, and a `@DPP` function returning the network's
+    variables, named `network_name`, by default after the file's network block.  Raises
+    `ValueError` for a `network_name` that is not a Python identifier or that the module
+    uses itself, and, naming the line, for anything the module docstring lists as refused.
 
-        >>> src = bif_to_python('''
+        >>> print(bif_to_python('''
         ...     network demo { }
         ...     variable rain { type discrete [ 2 ] { no, yes }; }
+        ...     variable wet-grass { type discrete [ 2 ] { no, yes }; }
         ...     probability ( rain ) { table 0.8, 0.2; }
-        ... ''')
-        >>> "class Rain(Enum)" in src, "def demo()" in src
-        (True, True)
+        ...     probability ( wet-grass | rain ) { (no) 0.9, 0.1; (yes) 0.2, 0.8; }
+        ... '''))
+        # Variables of the file written differently here:
+        #     'wet-grass' -> class Wet_grass, variable wet_grass
+        from pylea.syntax.dpp import DPP
+        from pylea.syntax.enum import Enum
+        <BLANKLINE>
+        <BLANKLINE>
+        class Rain(Enum):
+            elements = ['no', 'yes']
+        <BLANKLINE>
+        <BLANKLINE>
+        class Wet_grass(Enum):
+            elements = ['no', 'yes']
+        <BLANKLINE>
+        <BLANKLINE>
+        @DPP
+        def wet_grass_given_rain(rain: Rain) -> Wet_grass:
+            return Wet_grass.cpt(
+                [Rain],
+                {
+                    ('no',): [0.9, 0.1],
+                    ('yes',): [0.2, 0.8],
+                },
+            )(rain)
+        <BLANKLINE>
+        <BLANKLINE>
+        @DPP
+        def demo() -> tuple[Rain, Wet_grass]:
+            rain = Rain.random({'no': 0.8, 'yes': 0.2})
+            wet_grass = wet_grass_given_rain(rain)
+            return rain, wet_grass
     """
-    parsed_name, var_order, var_states, cpt_parents, cpt_rows = _parse_bif(bif_string)
-    fn_name = network_name or parsed_name
+    if network_name is not None:
+        if not network_name.isidentifier() or network_name in _RESERVED or (
+                Names().claim(network_name) != network_name):
+            raise ValueError(f"network_name {network_name!r} is not a Python identifier, or "
+                             "is one the generated module uses itself")
+    net = _parse_bif(bif_string)
+    order = topological_order(net.order, net.parents)
 
-    sorted_vars = _topo_sort(var_order, cpt_parents)
-
-    lines: list[str] = [
-        "from pylea.syntax.dpp import DPP",
-        "from pylea.syntax.enum import Enum",
-        "",
-        "",
-    ]
-
-    # --- Enum classes ---
-    for vname in var_order:
-        cls = _sanitize_class(vname)
-        states = var_states[vname]
-        elems = ", ".join(f'"{s}"' for s in states)
-        lines += [
-            f"class {cls}(Enum):",
-            f"    elements = [{elems}]",
-            "",
-            "",
-        ]
-
-    # --- CPT objects for conditional variables (via Enum.cpt, fast path) ---
-    cpt_fn_names: dict[str, str] = {}  # vname -> assigned name
-
-    for vname in sorted_vars:
-        parents = cpt_parents.get(vname, [])
-        if not parents:
-            continue
-
-        child_cls = _sanitize_class(vname)
-        parent_cls_names = [_sanitize_class(p) for p in parents]
-
-        parent_part = '_'.join(_sanitize_var(p) for p in parents)
-        fn_name_cpt = f"{_sanitize_var(vname)}_given_{parent_part}"
-        cpt_fn_names[vname] = fn_name_cpt
-
-        rows = cpt_rows[vname]
-        expr = _build_cpt_direct(rows, parent_cls_names, child_cls, indent=1)
-
-        params = ", ".join(f"{_sanitize_var(p)}: {c}"
-                           for p, c in zip(parents, parent_cls_names))
-        args = ", ".join(_sanitize_var(p) for p in parents)
-        lines += [
-            "@DPP",
-            f"def {fn_name_cpt}({params}) -> {child_cls}:",
-            f"    return {expr}({args})",
-            "",
-            "",
-        ]
-
-    # --- Joint distribution function ---
-    MULTILINE_THRESHOLD = 5
-    multiline = len(sorted_vars) > MULTILINE_THRESHOLD
-
-    if multiline:
-        type_items = "".join(f"\n    {_sanitize_class(v)}," for v in sorted_vars)
-        lines += [
-            "@DPP",
-            f"def {fn_name}() -> tuple[{type_items}\n]:",
-        ]
+    module = Names(reserved=_RESERVED)
+    if network_name is not None:
+        fn_name = module.claim(network_name)
+    elif net.name is None or net.name == "unknown":
+        fn_name = module.claim("bayesian_network")
     else:
-        ret_types = ", ".join(_sanitize_class(v) for v in sorted_vars)
+        fn_name = module.claim(net.name)
+    classes = dict(zip(net.order, module.claim_all(net.order, kind="class")))
+    # A local variable must not hide a class or table function the body uses, and a
+    # table function's parameters must not hide a class.
+    local = dict(zip(net.order, Names(reserved=classes.values()).claim_all(net.order,
+                                                                           kind="variable")))
+    table_names = Names(reserved=[*_RESERVED, fn_name, *classes.values(), *local.values()])
+    tables = {v: table_names.claim(
+                  f"{local[v]}_given_{'_'.join(local[p] for p in net.parents[v])}")
+              for v in order if net.parents[v]}
+
+    lines: list[str] = []
+    renamed = [v for v in net.order if (classes[v] != v[:1].upper() + v[1:]
+                                        or local[v] != (v.lower() if v[:1].isupper() else v))]
+    if renamed:
+        lines.append("# Variables of the file written differently here:")
+        lines += [f"#     {literal(v)} -> class {classes[v]}, variable {local[v]}"
+                  for v in renamed]
+    lines += ["from pylea.syntax.dpp import DPP", "from pylea.syntax.enum import Enum", "", ""]
+
+    for v in net.order:
+        elements = ", ".join(literal(s) for s in net.states[v])
+        lines += [f"class {classes[v]}(Enum):", f"    elements = [{elements}]", "", ""]
+
+    for v, table in tables.items():
+        parents = net.parents[v]
+        params = {p: local[p] for p in parents}
+        rows = [f"            {_tuple_literal(key)}: [{', '.join(repr(x) for x in values)}],"
+                for key, values in net.rows[v].items()]
         lines += [
             "@DPP",
-            f"def {fn_name}() -> tuple[{ret_types}]:",
+            f"def {table}({', '.join(f'{params[p]}: {classes[p]}' for p in parents)})"
+            f" -> {classes[v]}:",
+            f"    return {classes[v]}.cpt(",
+            f"        [{', '.join(classes[p] for p in parents)}],",
+            "        {",
+            *rows,
+            "        },",
+            f"    )({', '.join(params[p] for p in parents)})",
+            "",
+            "",
         ]
 
-    ret_vars: list[str] = []
-    for vname in sorted_vars:
-        cls = _sanitize_class(vname)
-        var = _sanitize_var(vname)
-        if var in ret_vars:
-            var = f"{var}_{sorted_vars.index(vname)}"
-        ret_vars.append(var)
-        parents = cpt_parents.get(vname, [])
-
-        if not parents:
-            probs = cpt_rows[vname][()]
-            rhs = _build_random(cls, var_states[vname], probs)
-            lines.append(f"    {var} = {rhs}")
+    types = [classes[v] for v in order]
+    if len(order) == 1:
+        returned = types[0]
+    elif len(order) > _MULTILINE:
+        returned = "tuple[" + "".join(f"\n    {t}," for t in types) + "\n]"
+    else:
+        returned = f"tuple[{', '.join(types)}]"
+    lines += ["@DPP", f"def {fn_name}() -> {returned}:"]
+    for v in order:
+        if net.parents[v]:
+            args = ", ".join(local[p] for p in net.parents[v])
+            lines.append(f"    {local[v]} = {tables[v]}({args})")
         else:
-            parent_local_vars = []
-            for p in parents:
-                p_var = _sanitize_var(p)
-                if p_var not in ret_vars:
-                    raise ValueError(f"Parent '{p}' not yet defined (check topological sort)")
-                p_idx = sorted_vars.index(p)
-                parent_local_vars.append(ret_vars[p_idx])
-            args = ", ".join(parent_local_vars)
-            fn = cpt_fn_names[vname]
-            lines.append(f"    {var} = {fn}({args})")
-
-    if multiline:
-        ret_items = "".join(f"\n        {v}," for v in ret_vars)
-        lines.append(f"    return ({ret_items}\n    )")
+            dist = ", ".join(f"{literal(s)}: {x!r}"
+                             for s, x in zip(net.states[v], net.rows[v][()]))
+            lines.append(f"    {local[v]} = {classes[v]}.random({{{dist}}})")
+    if len(order) > _MULTILINE:
+        lines.append("    return (" + "".join(f"\n        {local[v]}," for v in order) + "\n    )")
     else:
-        lines.append(f"    return {', '.join(ret_vars)}")
-
+        lines.append(f"    return {', '.join(local[v] for v in order)}")
     return "\n".join(lines)
+
+
+def _tuple_literal(key: tuple[str, ...]) -> str:
+    """`key` as a Python tuple of string literals."""
+    items = ", ".join(literal(s) for s in key)
+    return f"({items},)" if len(key) == 1 else f"({items})"
 
 
 # ---------------------------------------------------------------------------
@@ -342,305 +499,70 @@ def convert_suite(
     *,
     suite_name: str | None = None,
     verbose: bool = True,
-) -> tuple[int, int]:
-    """``(converted, failed)`` after writing one module per `.bif` file of `src_dir`.
+) -> tuple[dict[Path, Path], dict[Path, str]]:
+    """``(converted, failed)`` after writing one module per `.bif` file directly in
+    `src_dir` into `dst_dir`, a package created where missing.
 
-    `dst_dir` is created if it does not exist.  A file that fails to convert is counted and
-    skipped rather than raising.
+    `converted` maps each file converted to its module, `failed` each other file to the
+    message saying why it was not converted.  A module and its network function are named
+    after the file, made a distinct identifier with the prefix `bn_` where needed.  With
+    `verbose`, a line per file is printed, labelled with `suite_name`, by default the name
+    of `src_dir`.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as d:
+        ...     src, dst = Path(d, "networks"), Path(d, "modules")
+        ...     src.mkdir()
+        ...     _ = Path(src, "coin-1.bif").write_text(
+        ...         'variable c { type discrete [ 2 ] { h, t }; } probability ( c ) { table 0.5, 0.5; }')
+        ...     _ = Path(src, "coin-2.bif").write_text(
+        ...         'variable c { type discrete [ 2 ] { h, t }; } probability ( c ) { table 0.5, 0.6; }')
+        ...     converted, failed = convert_suite(src, dst, verbose=False)
+        ...     [p.name for p in converted.values()], list(failed.values())
+        (['coin_1.py'], ["line 1: variable 'c': the probabilities of the table sum to 1.1, not 1"])
     """
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    init = dst_dir / "__init__.py"
-    if not init.exists():
-        init.write_text("")
-
-    label = suite_name or src_dir.name
-    ok = failed = 0
-
-    for bif_path in sorted(src_dir.glob("*.bif")):
-        stem = bif_path.stem
-        mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", stem)
-        if mod_name[0].isdigit():
-            mod_name = f"bn_{mod_name}"
-        out_path = dst_dir / f"{mod_name}.py"
-
-        try:
-            code = bif_to_python(bif_path.read_text(), network_name=mod_name)
-            out_path.write_text(code + "\n")
-            if verbose:
-                print(f"  [{label}] {stem} → {mod_name}.py")
-            ok += 1
-        except Exception as exc:
-            if verbose:
-                print(f"  [{label}] SKIP {stem}: {exc}")
-            failed += 1
-
-    return ok, failed
+    return convert_directory(
+        src_dir, dst_dir, ".bif", lambda text, name: bif_to_python(text, network_name=name),
+        prefix="bn_", reserved=_RESERVED, label=suite_name or src_dir.name, verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
-# Benchmark query generation
+# Command line
 # ---------------------------------------------------------------------------
 
-def _ancestors(vname: str, cpt_parents: dict[str, list[str]]) -> set[str]:
-    """Every ancestor of `vname`, however far up."""
-    result: set[str] = set()
-    stack = list(cpt_parents.get(vname, []))
-    while stack:
-        p = stack.pop()
-        if p not in result:
-            result.add(p)
-            stack.extend(cpt_parents.get(p, []))
-    return result
-
-
-def pick_query_variable(
-    var_order: list[str],
-    cpt_parents: dict[str, list[str]],
-) -> str:
-    """The variable a generated marginal query asks about.
-
-    The leaf with the most ancestors, a leaf being a variable that is never a parent, so
-    that the query depends on as much of the network as possible.  Ties break
-    alphabetically, so that the same network always gives the same query.
-
-        >>> pick_query_variable(["rain", "sprinkler", "grass"],
-        ...                     {"grass": ["rain", "sprinkler"]})
-        'grass'
-    """
-    all_parents: set[str] = {p for ps in cpt_parents.values() for p in ps}
-    leaves = [v for v in var_order if v not in all_parents]
-    if not leaves:
-        leaves = list(var_order)
-
-    return max(leaves, key=lambda v: (len(_ancestors(v, cpt_parents)), v))
-
-
-def query_module_name(mod_name: str, n_evidence: int) -> str:
-    """The name of the query module over network `mod_name` conditioned on `n_evidence`.
-
-    The marginal query keeps the network's own name, so generating conditioned queries
-    beside an existing corpus of marginal ones leaves the latter untouched.
-
-        >>> query_module_name("alarm", 0), query_module_name("alarm", 5)
-        ('alarm', 'alarm_e5')
-    """
-    return mod_name if n_evidence == 0 else f"{mod_name}_e{n_evidence}"
-
-
-def _sample_assignment(sorted_vars, var_states, cpt_parents, cpt_rows, rng) -> dict[str, str]:
-    """One draw from the network's joint distribution, as ``{variable: state}``.
-
-    Drawn in topological order, so a variable is drawn only once its parents have been.
-    Evidence read off such a draw has positive probability by construction, which evidence
-    assembled state by state does not.
-    """
-    drawn: dict[str, str] = {}
-    for v in sorted_vars:
-        key = tuple(drawn[p] for p in cpt_parents.get(v, []))
-        rows = cpt_rows[v]
-        if key not in rows:
-            raise ValueError(f"{v}: the CPT has no row for parent states {key}")
-        drawn[v] = rng.choices(var_states[v], weights=rows[key])[0]
-    return drawn
-
-
-def query_specification(bif_string: str, *, n_evidence: int = 0, seed: int = 0) -> tuple[
-    tuple[int, str, str],                 # the query: position, variable, state
-    list[tuple[int, str, str]],           # the evidence, in network order
-]:
-    """What the generated query asks of the network `bif_string` describes.
-
-    A position is an index into the tuple the converted network returns, which holds the
-    variables in topological order.  The query variable is `pick_query_variable`'s choice
-    and the state is its first.  The evidence variables are drawn uniformly at random from
-    the others under `seed`, and their states come from one draw from the network itself, so
-    the evidence is typical of the model and cannot have probability zero.
-
-    Kept apart from the module `make_query_module` renders, so that what a benchmark asks
-    can be read without parsing generated source.
-    """
-    _, var_order, var_states, cpt_parents, cpt_rows = _parse_bif(bif_string)
-    sorted_vars = _topo_sort(var_order, cpt_parents)
-    rng = random.Random(seed)
-
-    query_var = pick_query_variable(var_order, cpt_parents)
-    others = [v for v in sorted_vars if v != query_var]
-    chosen = rng.sample(others, min(n_evidence, len(others)))
-    drawn = _sample_assignment(sorted_vars, var_states, cpt_parents, cpt_rows, rng)
-
-    query = (sorted_vars.index(query_var), query_var, var_states[query_var][0])
-    evidence = sorted((sorted_vars.index(v), v, drawn[v]) for v in chosen)
-    return query, evidence
-
-
-def make_query_module(
-    bif_string: str,
-    *,
-    mod_name: str,
-    pylea_import_path: str,
-    n_evidence: int = 0,
-    seed: int = 0,
-) -> str:
-    """The source of a module asking one query of the network `mod_name`, as a `@DPP`.
-
-    The query is ``P(leaf == first_state | evidence)``, the leaf being
-    `pick_query_variable`'s choice.  `n_evidence` says how many variables are conditioned
-    on, and `query_specification` describes how those are chosen; at zero the query is the
-    plain marginal and nothing is observed.
-
-    The evidence is fixed here, as the module is generated, rather than at run time, so that
-    a benchmark is a file which can be read and cited rather than a function of a seed.
-
-    `pylea_import_path` is the dotted path to the converted network module, which the
-    generated module imports and calls.
-    """
-    query, evidence = query_specification(bif_string, n_evidence=n_evidence, seed=seed)
-    _, query_var, query_state = query
-
-    given = ", ".join(f"{v} = '{s}'" for _, v, s in evidence)
-    head = f"# Query: P({query_var} == '{query_state}'"
-    lines = [
-        "from pylea import DPP, Bool" + (", observe" if evidence else ""),
-        f"from {pylea_import_path} import {mod_name} as _network",
-        "",
-        head + (f" | {given})" if evidence else ")"),
-    ]
-    if evidence:
-        lines += [
-            "# Evidence variables drawn uniformly at random, their states drawn from the",
-            f"# network's own joint distribution, seed {seed}.",
-        ]
-    lines += [
-        "@DPP",
-        f"def {query_module_name(mod_name, n_evidence)}() -> Bool:",
-        "    xs = _network()",
-    ]
-    lines += [f'    observe(xs[{i}] == "{s}")   # {v}' for i, v, s in evidence]
-    lines.append(f'    return xs[{query[0]}] == "{query_state}"   # {query_var}')
-    return "\n".join(lines)
-
-
-def generate_benchmarks(
-    bif_dir: Path,
-    pylea_dir: Path,
-    dst_dir: Path,
-    *,
-    package: str,
-    n_evidence: int = 0,
-    seed: int = 0,
-    verbose: bool = True,
-) -> tuple[int, int]:
-    """``(written, failed)`` after writing one query module per `.bif` file of `bif_dir`.
-
-    Each module asks `make_query_module`'s query of the corresponding network, conditioned
-    on `n_evidence` variables under `seed`.  `pylea_dir` holds the networks `convert_suite`
-    converted, and `package` is the dotted path under which the generated modules import
-    them, such as ``"networks"`` for a folder `networks` on the import path.  A network
-    without a module in `pylea_dir` is counted as failed.
-    """
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    init = dst_dir / "__init__.py"
-    if not init.exists():
-        init.write_text("")
-
-    ok = failed = 0
-    for bif_path in sorted(bif_dir.glob("*.bif")):
-        stem = bif_path.stem
-        mod_name = re.sub(r"[^a-zA-Z0-9_]", "_", stem)
-        if mod_name[0].isdigit():
-            mod_name = f"bn_{mod_name}"
-
-        pylea_mod_path = pylea_dir / f"{mod_name}.py"
-        if not pylea_mod_path.exists():
-            if verbose:
-                print(f"  SKIP {stem}: no Pylea module at {pylea_mod_path}")
-            failed += 1
-            continue
-
-        import_path = f"{package}.{mod_name}"
-        out_path = dst_dir / f"{query_module_name(mod_name, n_evidence)}.py"
-
-        try:
-            code = make_query_module(
-                bif_path.read_text(),
-                mod_name=mod_name,
-                pylea_import_path=import_path,
-                n_evidence=n_evidence,
-                seed=seed,
-            )
-            out_path.write_text(code + "\n")
-            if verbose:
-                print(f"  {stem} → {out_path.name}")
-            ok += 1
-        except Exception as exc:
-            if verbose:
-                print(f"  SKIP {stem}: {exc}")
-            failed += 1
-
-    return ok, failed
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
+def _main(argv: list[str] | None = None) -> int:
+    """The exit status of the command line run with the arguments `argv`."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Convert .bif Bayesian network files to Pylea DPP Python modules."
-    )
-    parser.add_argument(
-        "--src", default=None,
-        help="Directory containing .bif files.",
-    )
-    parser.add_argument(
-        "--dst", default=None,
-        help="Output directory for generated Python modules.",
-    )
-    parser.add_argument(
-        "--file", default=None,
-        help="Convert a single .bif file and print to stdout.",
-    )
-    parser.add_argument(
-        "--queries", default=None,
-        help="Also write one query module per network into this directory.",
-    )
-    parser.add_argument(
-        "--package", default=None,
-        help="The dotted path under which the query modules import the networks of --dst.",
-    )
-    parser.add_argument(
-        "--evidence", type=int, default=0,
-        help="How many variables each generated query conditions on.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=0,
-        help="Seed choosing the evidence variables and their states.",
-    )
-    args = parser.parse_args()
-    if not args.file and (args.src is None or args.dst is None):
+        prog="python -m pylea.utility.bif_to_dpp",
+        description="Convert Bayesian networks in the .bif format to Pylea modules.  Given "
+                    "--file, print its module; given --src and --dst, write one module per "
+                    ".bif file of the folder --src into the folder --dst.")
+    parser.add_argument("--file", help="a .bif file whose module is printed")
+    parser.add_argument("--src", help="a folder of .bif files")
+    parser.add_argument("--dst", help="the folder to write the modules into")
+    args = parser.parse_args(argv)
+    if args.file is not None:
+        if args.src is not None or args.dst is not None:
+            parser.error("give --file, or --src and --dst, not both")
+        path = Path(args.file)
+        try:
+            print(bif_to_python(path.read_text(encoding="utf-8"),
+                                network_name=module_name(path.stem, "bn_", _RESERVED)))
+        except (ValueError, OSError) as exc:
+            parser.exit(1, f"{parser.prog}: {path}: {exc}\n")
+        return 0
+    if args.src is None or args.dst is None:
         parser.error("give --file, or both --src and --dst")
-    if args.queries and args.package is None:
-        parser.error("--queries needs --package")
+    src = Path(args.src)
+    if not src.is_dir():
+        parser.error(f"{src} is not a folder")
+    if not any(src.glob("*.bif")):
+        parser.error(f"no .bif files in {src}")
+    _, failed = convert_suite(src, Path(args.dst), verbose=True)
+    return 1 if failed else 0
 
-    if args.file:
-        bif_path = Path(args.file)
-        print(bif_to_python(bif_path.read_text(), network_name=bif_path.stem))
-    else:
-        convert_suite(
-            Path(args.src),
-            Path(args.dst),
-            suite_name="bayesian_networks",
-            verbose=True,
-        )
-        if args.queries:
-            generate_benchmarks(
-                Path(args.src),
-                Path(args.dst),
-                Path(args.queries),
-                package=args.package,
-                n_evidence=args.evidence,
-                seed=args.seed,
-                verbose=True,
-            )
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
